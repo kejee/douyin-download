@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>抖音短视频/图集在线解析与下载 | 无水印高清提取</title>
+    <meta name="description" content="免费、快速、开源的抖音短视频与图集在线解析下载工具，支持无水印/带水印视频下载、原声音频提取及高清图集批量下载。">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="bg-glow-orb bg-glow-1"></div>
+    <div class="bg-glow-orb bg-glow-2"></div>
+    <div class="bg-glow-orb bg-glow-3"></div>
+
+    <div class="app-container">
+        <!-- 顶部导航 -->
+        <header class="app-header">
+            <div class="header-logo">
+                <div class="logo-icon">
+                    <i class="fa-brands fa-tiktok"></i>
+                </div>
+                <div class="logo-text">
+                    <span class="logo-title">Douyin Parser</span>
+                    <span class="badge badge-pro">PRO</span>
+                </div>
+            </div>
+            <div class="header-nav">
+                <button class="nav-btn" id="openDisclaimerBtn" title="查看免责声明">
+                    <i class="fa-solid fa-shield-halved"></i> 免责声明
+                </button>
+                <a href="https://github.com/kejee/douyin-download" target="_blank" id="githubLink" class="nav-btn nav-btn-icon" title="查看 GitHub 仓库">
+                    <i class="fa-brands fa-github"></i>
+                </a>
+            </div>
+        </header>
+
+        <!-- 主内容区域 -->
+        <main class="main-content">
+            <!-- 标题区 -->
+            <section class="hero-section">
+                <h1 class="hero-title">
+                    抖音短视频 & 图集 <span class="text-gradient">无水印高清解析</span>
+                </h1>
+                <p class="hero-subtitle">
+                    支持视频无水印/带水印提取、原声 MP3 音频分离、高清图集一键打包下载
+                </p>
+            </section>
+
+            <!-- 输入卡片 -->
+            <section class="card input-card">
+                <div class="input-wrapper">
+                    <div class="input-icon">
+                        <i class="fa-solid fa-link"></i>
+                    </div>
+                    <textarea 
+                        id="urlInput" 
+                        class="url-input" 
+                        placeholder="粘贴抖音分享文本或链接（例如：7.21 H@m.IO 复制打开抖音... https://v.douyin.com/xxxx/）"
+                        rows="2"
+                    ></textarea>
+                    <div class="input-actions">
+                        <button id="pasteBtn" class="btn-secondary-sm" title="从剪贴板粘贴">
+                            <i class="fa-solid fa-paste"></i> 粘贴
+                        </button>
+                        <button id="clearBtn" class="btn-secondary-sm" title="清空输入" style="display: none;">
+                            <i class="fa-solid fa-xmark"></i> 清空
+                        </button>
+                    </div>
+                </div>
+
+                <div class="parse-action-row">
+                    <button id="parseBtn" class="btn-primary">
+                        <span class="btn-text"><i class="fa-solid fa-bolt-lightning"></i> 立即解析</span>
+                        <span class="btn-loader" style="display: none;"><i class="fa-solid fa-spinner fa-spin"></i> 正在解析中...</span>
+                    </button>
+                </div>
+            </section>
+
+            <!-- 骨架屏 Loading -->
+            <div id="skeletonLoading" class="card result-card skeleton-container" style="display: none;">
+                <div class="skeleton-player shimmer"></div>
+                <div class="skeleton-info">
+                    <div class="skeleton-line shimmer w-75"></div>
+                    <div class="skeleton-line shimmer w-50"></div>
+                    <div class="skeleton-btn-grid">
+                        <div class="skeleton-btn shimmer"></div>
+                        <div class="skeleton-btn shimmer"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 解析结果展示区 -->
+            <section id="resultContainer" class="card result-card" style="display: none;">
+                <!-- 动态注入解析结果 -->
+            </section>
+        </main>
+
+        <!-- 底部免责声明横幅 -->
+        <footer class="app-footer">
+            <div class="disclaimer-bar">
+                <i class="fa-solid fa-circle-exclamation"></i>
+                <span><strong>免责声明：</strong>本工具仅供技术研究与个人学习交流使用，严禁用于任何商业用途或侵犯他人版权行为。</span>
+                <a href="javascript:void(0)" id="footerDisclaimerLink">查看详情</a>
+            </div>
+            <div class="footer-copy">
+                <span>© 2026 Douyin Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- 免责声明模态弹窗 -->
+    <div class="modal-overlay" id="disclaimerModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fa-solid fa-shield-halved text-gradient"></i> 法律免责声明 (Disclaimer)
+                </div>
+                <button class="modal-close" id="closeDisclaimerBtn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <h4>1. 仅供学习与技术研究</h4>
+                <p>本开源项目及 Web 界面仅用于网络技术学习、接口分析及个人学术研究目的。请勿将本软件及其衍生服务用于任何商业营利活动。</p>
+                
+                <h4>2. 版权与知识产权</h4>
+                <p>通过本工具解析获取的所有视频、音频、图片及文字素材，其版权均归属于原始创作者及抖音（字节跳动）平台所有。使用者在下载和使用相关媒体内容时，必须遵守版权法律法规，并尊重原作者的知识产权。</p>
+                
+                <h4>3. 使用者责任</h4>
+                <p>使用者须对使用本工具产生的行为及后果承担全部法律责任。若因使用者违规下载、传播、二次剪辑分发或商用侵犯他人合法权益，本软件作者及项目贡献者不承担任何直接或连带法律责任。</p>
+                
+                <h4>4. 服务可用性</h4>
+                <p>本项目不保证服务的持续可用性、稳定性或及时性。目标平台可能会随时调整接口策略与防爬措施。</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-primary" id="acceptDisclaimerBtn">我已知悉并同意</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 提示容器 -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

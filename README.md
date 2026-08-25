@@ -1,7 +1,8 @@
 # 🎵 抖音短视频 & 图集在线解析下载 Web 平台 (Douyin Downloader)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.0.0.1001-blue.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-v1.0.0.1002-blue.svg" alt="Version">
+  <img src="https://img.shields.io/badge/Cloudflare-Pages%20%7C%20Workers-orange.svg" alt="Cloudflare Ready">
   <img src="https://img.shields.io/badge/Python-3.11+-blue.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/FastAPI-0.100+-green.svg" alt="FastAPI">
   <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg" alt="Docker Ready">
@@ -9,7 +10,7 @@
   <img src="https://img.shields.io/badge/UI-Glassmorphism-purple.svg" alt="Glassmorphism UI">
 </p>
 
-一款现代化、轻量高效、开源的抖音短视频/图集在线解析与下载平台。采用 FastAPI + 现代化极简毛玻璃 UI 开发，支持无水印与带水印视频下载、原声音频分离提取、高清图集批量下载与流式防盗链代理。
+一款现代化、轻量高效、开源的抖音短视频/图集在线解析与下载平台。采用 FastAPI / Cloudflare Serverless + 现代化极简毛玻璃 UI 开发，支持无水印与带水印视频下载、原声音频分离提取、高清图集批量下载与流式防盗链代理。
 
 ---
 
@@ -20,6 +21,7 @@
 - 🖼️ **高清图集支持**：自动识别图集作品，支持在线画廊预览、单张原图下载及一键批量打包下载。
 - 🎵 **背景音乐提取**：一键单独提取并下载视频/图集中的高清原声 MP3 文件。
 - 🛡️ **突破防盗链**：内置流式代理下载服务，解决浏览器直接访问 CDN 触发 403 防盗链或变为在线播放无法触发下载的问题。
+- ☁️ **Serverless 零成本全托管**：支持 **Cloudflare Pages** 与 **Cloudflare Workers** 边缘部署，无需购买服务器即可运行。
 - 🎨 **极美深色毛玻璃 UI**：暗黑科技质感、霓虹流光、平滑过渡动画、移动端自适应响应式布局。
 - 🐳 **容器化与自动化 CI/CD**：提供官方 Docker 镜像，配置 GitHub Actions 自动多架构（amd64 / arm64）构建与推送至 GHCR。
 
@@ -27,7 +29,20 @@
 
 ## 🚀 快速开始
 
-### 方式一：Docker Compose（推荐）
+### 方式一：Cloudflare Pages 一键全栈托管（零成本 / 推荐）
+
+适合无服务器用户，每天拥有 100,000 次免费请求：
+
+1. 进入 [Cloudflare Dashboard](https://dash.cloudflare.com/) > **Workers & Pages** > **Create** > **Pages** > **Connect to Git**。
+2. 绑定本仓库，选择分支，在构建设置中：
+   - **Framework preset**: `None`
+   - **Build output directory**: `static`
+3. 点击 **Save and Deploy** 即可完成部署！
+4. 详见完整文档：[Cloudflare 部署指南](CLOUDFLARE_DEPLOY.md)。
+
+---
+
+### 方式二：Docker Compose（自建服务器推荐）
 
 本项目已提供标准的 `docker-compose.yml`，执行以下命令即可在后台启动服务：
 

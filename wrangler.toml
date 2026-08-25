@@ -1,0 +1,6 @@
+name = "douyin-downloader"
+pages_build_output_dir = "static"
+compatibility_date = "2024-01-01"
+
+[observability]
+enabled = true

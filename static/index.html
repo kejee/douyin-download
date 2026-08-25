@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,11 +10,14 @@
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700&display=swap"
+        rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
+
 <body>
     <div class="bg-glow-orb bg-glow-1"></div>
     <div class="bg-glow-orb bg-glow-2"></div>
@@ -29,15 +33,33 @@
                 <span class="logo-title">Douyin Parser</span>
             </div>
             <div class="header-nav">
-                <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d" target="_blank" rel="noopener noreferrer" class="nav-btn nav-btn-sponsor" title="赞助商推荐">
+                <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d"
+                    target="_blank" rel="noopener noreferrer" class="nav-btn nav-btn-sponsor" title="赞助商推荐">
                     <i class="fa-solid fa-fire text-gradient"></i> 赞助推荐
                 </a>
-                <button class="nav-btn" id="openDisclaimerBtn" title="查看免责声明">
-                    <i class="fa-solid fa-shield-halved"></i> 免责声明
-                </button>
-                <a href="https://github.com/kejee/douyin-download" target="_blank" id="githubLink" class="nav-btn nav-btn-icon" title="查看 GitHub 仓库">
-                    <i class="fa-brands fa-github"></i>
-                </a>
+                <div class="header-nav-desktop">
+                    <button class="nav-btn" id="openDisclaimerBtn" title="查看免责声明">
+                        <i class="fa-solid fa-shield-halved"></i> 免责声明
+                    </button>
+                    <a href="https://github.com/kejee/douyin-download" target="_blank" id="githubLink"
+                        class="nav-btn nav-btn-icon" title="查看 GitHub 仓库">
+                        <i class="fa-brands fa-github"></i>
+                    </a>
+                </div>
+                <div class="header-menu-container">
+                    <button class="nav-btn nav-btn-icon" id="menuToggleBtn" title="更多菜单" aria-label="更多菜单">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                    <div class="header-dropdown-menu" id="headerDropdownMenu">
+                        <button class="dropdown-item" id="menuDisclaimerBtn">
+                            <i class="fa-solid fa-shield-halved"></i> 免责声明
+                        </button>
+                        <a href="https://github.com/kejee/douyin-download" target="_blank" class="dropdown-item"
+                            id="menuGithubLink">
+                            <i class="fa-brands fa-github"></i> GitHub
+                        </a>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -69,18 +91,16 @@
                             </button>
                         </div>
                     </div>
-                    <textarea 
-                        id="urlInput" 
-                        class="url-input" 
+                    <textarea id="urlInput" class="url-input"
                         placeholder="粘贴抖音分享文本或链接（例如：7.21 H@m.IO 复制打开抖音... https://v.douyin.com/xxxx/）"
-                        rows="3"
-                    ></textarea>
+                        rows="3"></textarea>
                 </div>
 
                 <div class="parse-action-row">
                     <button id="parseBtn" class="btn-primary">
                         <span class="btn-text"><i class="fa-solid fa-bolt-lightning"></i> 立即解析</span>
-                        <span class="btn-loader" style="display: none;"><i class="fa-solid fa-spinner fa-spin"></i> 正在解析中...</span>
+                        <span class="btn-loader" style="display: none;"><i class="fa-solid fa-spinner fa-spin"></i>
+                            正在解析中...</span>
                     </button>
                 </div>
             </section>
@@ -107,12 +127,14 @@
             <section class="card ad-card-container">
                 <div class="ad-card-header">
                     <span class="ad-tag"><i class="fa-solid fa-rectangle-ad"></i> 赞助推荐</span>
-                    <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d" target="_blank" rel="noopener noreferrer" class="ad-sponsor-link">
+                    <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d"
+                        target="_blank" rel="noopener noreferrer" class="ad-sponsor-link">
                         <span>🔥 探索更多精选</span> <i class="fa-solid fa-arrow-up-right-from-square"></i>
                     </a>
                 </div>
                 <div class="ad-banner-body">
-                    <script async="async" data-cfasync="false" src="https://pl31021771.profitableratecpmnetwork.com/8cf9c301fd152cb4c0ab0b55a66d8166/invoke.js"></script>
+                    <script async="async" data-cfasync="false"
+                        src="https://pl31021771.profitableratecpmnetwork.com/8cf9c301fd152cb4c0ab0b55a66d8166/invoke.js"></script>
                     <div id="container-8cf9c301fd152cb4c0ab0b55a66d8166"></div>
                 </div>
             </section>
@@ -132,7 +154,7 @@
                     <span>© 2026 Douyin Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v1.0.0.1001</span>
+                    <span class="badge badge-version">v1.0.0.1002</span>
                 </div>
             </div>
         </footer>
@@ -150,13 +172,13 @@
             <div class="modal-body">
                 <h4>1. 仅供学习与技术研究</h4>
                 <p>本开源项目及 Web 界面仅用于网络技术学习、接口分析及个人学术研究目的。请勿将本软件及其衍生服务用于任何商业营利活动。</p>
-                
+
                 <h4>2. 版权与知识产权</h4>
                 <p>通过本工具解析获取的所有视频、音频、图片及文字素材，其版权均归属于原始创作者及抖音（字节跳动）平台所有。使用者在下载和使用相关媒体内容时，必须遵守版权法律法规，并尊重原作者的知识产权。</p>
-                
+
                 <h4>3. 使用者责任</h4>
                 <p>使用者须对使用本工具产生的行为及后果承担全部法律责任。若因使用者违规下载、传播、二次剪辑分发或商用侵犯他人合法权益，本软件作者及项目贡献者不承担任何直接或连带法律责任。</p>
-                
+
                 <h4>4. 服务可用性</h4>
                 <p>本项目不保证服务的持续可用性、稳定性或及时性。目标平台可能会随时调整接口策略与防爬措施。</p>
             </div>
@@ -171,4 +193,5 @@
 
     <script src="/static/js/app.js"></script>
 </body>
+
 </html>

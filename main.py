@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import httpx
 from douyin import DouyinParser, DEFAULT_USER_AGENT
 
-APP_VERSION = "1.0.0.1001"
+APP_VERSION = "1.0.0.1002"
 
 app = FastAPI(
     title="抖音短视频/图集解析下载服务",

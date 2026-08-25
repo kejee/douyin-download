@@ -74,16 +74,45 @@ function closeDisclaimer() {
     disclaimerModal.classList.remove("active");
 }
 
-openDisclaimerBtn.addEventListener("click", openDisclaimer);
-footerDisclaimerLink.addEventListener("click", openDisclaimer);
-closeDisclaimerBtn.addEventListener("click", closeDisclaimer);
-acceptDisclaimerBtn.addEventListener("click", () => {
-    closeDisclaimer();
-    showToast("已确认免责声明", "success");
-});
-disclaimerModal.addEventListener("click", (e) => {
-    if (e.target === disclaimerModal) closeDisclaimer();
-});
+if (openDisclaimerBtn) openDisclaimerBtn.addEventListener("click", openDisclaimer);
+if (footerDisclaimerLink) footerDisclaimerLink.addEventListener("click", openDisclaimer);
+if (closeDisclaimerBtn) closeDisclaimerBtn.addEventListener("click", closeDisclaimer);
+if (acceptDisclaimerBtn) {
+    acceptDisclaimerBtn.addEventListener("click", () => {
+        closeDisclaimer();
+        showToast("已确认免责声明", "success");
+    });
+}
+if (disclaimerModal) {
+    disclaimerModal.addEventListener("click", (e) => {
+        if (e.target === disclaimerModal) closeDisclaimer();
+    });
+}
+
+// 移动端下拉菜单交互
+const menuToggleBtn = document.getElementById("menuToggleBtn");
+const headerDropdownMenu = document.getElementById("headerDropdownMenu");
+const menuDisclaimerBtn = document.getElementById("menuDisclaimerBtn");
+
+if (menuToggleBtn && headerDropdownMenu) {
+    menuToggleBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        headerDropdownMenu.classList.toggle("active");
+    });
+
+    if (menuDisclaimerBtn) {
+        menuDisclaimerBtn.addEventListener("click", () => {
+            headerDropdownMenu.classList.remove("active");
+            openDisclaimer();
+        });
+    }
+
+    document.addEventListener("click", (e) => {
+        if (!headerDropdownMenu.contains(e.target) && !menuToggleBtn.contains(e.target)) {
+            headerDropdownMenu.classList.remove("active");
+        }
+    });
+}
 
 // 格式化数字 (如点赞数)
 function formatNumber(num) {

@@ -177,7 +177,7 @@ function renderResult(data) {
         const noWmUrl = video.no_watermark_url;
         const wmUrl = video.watermark_url;
 
-        // 视频播放器 (优先使用代理或真实无水印链接)
+        // 视频播放器 (直接免代理加载，配合 no-referrer 策略)
         mediaHtml = `
             <div class="media-preview-container">
                 <video 
@@ -186,6 +186,7 @@ function renderResult(data) {
                     controls 
                     playsinline
                     preload="metadata"
+                    referrerpolicy="no-referrer"
                 ></video>
             </div>
         `;
@@ -218,7 +219,7 @@ function renderResult(data) {
         // 图集展示
         const galleryItems = images.map((imgUrl, idx) => `
             <div class="gallery-item">
-                <img src="${imgUrl}" alt="图片 ${idx + 1}" loading="lazy">
+                <img src="${imgUrl}" alt="图片 ${idx + 1}" loading="lazy" referrerpolicy="no-referrer">
                 <div class="gallery-item-action">
                     <button class="btn-secondary-sm" onclick="triggerDownload('${imgUrl}', '${cleanTitle}_图${idx + 1}.jpg')">
                         <i class="fa-solid fa-download"></i> 图 ${idx + 1}
@@ -255,7 +256,7 @@ function renderResult(data) {
             </div>
             <div class="info-panel">
                 <div class="author-box">
-                    <img class="author-avatar" src="${author.avatar || '/static/avatar-placeholder.png'}" alt="${author.nickname}" onerror="this.src='https://ui-avatars.com/api/?name=User&background=6366f1&color=fff'">
+                    <img class="author-avatar" src="${author.avatar || '/static/avatar-placeholder.png'}" alt="${author.nickname}" referrerpolicy="no-referrer" onerror="this.src='https://ui-avatars.com/api/?name=User&background=6366f1&color=fff'">
                     <div class="author-meta">
                         <span class="author-name">${author.nickname}</span>
                         <span class="author-id">抖音号：${author.unique_id}</span>

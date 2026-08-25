@@ -212,6 +212,16 @@ function renderResult(data) {
                 <button class="btn-secondary grid-span-2" onclick="triggerDownload('${cover}', '${cleanTitle}_封面.jpg')">
                     <i class="fa-regular fa-image"></i> 下载高清视频封面
                 </button>` : ''}
+                <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d" target="_blank" rel="noopener noreferrer" class="btn-sponsor-cta grid-span-2" title="赞助推荐">
+                    <div class="sponsor-cta-content">
+                        <i class="fa-solid fa-fire text-gradient"></i>
+                        <div class="sponsor-cta-text">
+                            <span class="sponsor-cta-title">热门推荐</span>
+                            <span class="sponsor-cta-desc">探索精选实用好物与工具</span>
+                        </div>
+                    </div>
+                    <span class="sponsor-cta-btn">立即查看 <i class="fa-solid fa-arrow-up-right-from-square"></i></span>
+                </a>
             </div>
         `;
     } else if (type === "images") {
@@ -244,6 +254,16 @@ function renderResult(data) {
                 <button class="btn-secondary grid-span-2 btn-outline-cyan" onclick="triggerDownload('${music.url}', '${cleanTitle}_原声.mp3')">
                     <i class="fa-solid fa-music"></i> 提取背景音乐 MP3
                 </button>` : ''}
+                <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d" target="_blank" rel="noopener noreferrer" class="btn-sponsor-cta grid-span-2" title="赞助推荐">
+                    <div class="sponsor-cta-content">
+                        <i class="fa-solid fa-fire text-gradient"></i>
+                        <div class="sponsor-cta-text">
+                            <span class="sponsor-cta-title">热门推荐</span>
+                            <span class="sponsor-cta-desc">探索精选实用好物与工具</span>
+                        </div>
+                    </div>
+                    <span class="sponsor-cta-btn">立即查看 <i class="fa-solid fa-arrow-up-right-from-square"></i></span>
+                </a>
             </div>
         `;
     }

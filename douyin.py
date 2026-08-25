@@ -4,14 +4,13 @@ import urllib.parse
 from typing import Dict, Any, Optional, List
 import httpx
 
+APP_USER_AGENT = (
+    "com.ss.android.ugc.aweme/230501 (Linux; U; Android 10; zh_CN; MI 9; Build/QKQ1.190825.002; Cronet/TTNetVersion:b4d74d15 2020-04-23 QuicVersion:0144d358 2020-03-24)"
+)
+
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
-)
-
-PC_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 class DouyinParser:
@@ -21,6 +20,10 @@ class DouyinParser:
             "User-Agent": DEFAULT_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        self.app_headers = {
+            "User-Agent": APP_USER_AGENT,
+            "Accept": "*/*",
         }
 
     @staticmethod
@@ -44,7 +47,7 @@ class DouyinParser:
                 resp = await client.get(url)
                 final_url = str(resp.url)
                 
-                # 从最终 URL 匹配
+                # 从最终 URL 路径匹配
                 id_match = re.search(r"/(?:video|note)/(\d+)", final_url)
                 if id_match:
                     return id_match.group(1)
@@ -53,20 +56,38 @@ class DouyinParser:
                 id_match = re.search(r"(?:modal_id|item_ids|aweme_id)=(\d+)", final_url)
                 if id_match:
                     return id_match.group(1)
-            except Exception as e:
-                # 尝试从原始链接二次提取
+            except Exception:
                 pass
         return None
 
+    async def _fetch_from_feed_api(self, client: httpx.AsyncClient, aweme_id: str) -> Optional[Dict[str, Any]]:
+        """方案一（最稳定）：通过客户端原生 Feed 接口获取完整作品信息"""
+        feed_endpoints = [
+            f"https://api5-normal-c-lq.amemv.com/aweme/v1/feed/?aweme_id={aweme_id}",
+            f"https://api.amemv.com/aweme/v1/feed/?aweme_id={aweme_id}",
+            f"https://api3-normal-c-hl.amemv.com/aweme/v1/feed/?aweme_id={aweme_id}",
+        ]
+        
+        for ep in feed_endpoints:
+            try:
+                resp = await client.get(ep, headers=self.app_headers, timeout=self.timeout)
+                if resp.status_code == 200 and resp.text:
+                    data = resp.json()
+                    aweme_list = data.get("aweme_list", [])
+                    if aweme_list and len(aweme_list) > 0:
+                        return aweme_list[0]
+            except Exception:
+                continue
+        return None
+
     def _extract_item_from_html(self, html: str) -> Optional[Dict[str, Any]]:
-        """从分享页 HTML 中提取数据"""
+        """方案二：从 H5 分享页 SSR HTML 中提取数据"""
         # 模式 1: _ROUTER_DATA
-        router_match = re.search(r"window\._ROUTER_DATA\s*=\s*(.*?);\s*</script>", html)
+        router_match = re.search(r"window\._ROUTER_DATA\s*=\s*(.*?);\s*</script>", html, re.DOTALL)
         if router_match:
             try:
-                raw_json = router_match.group(1)
+                raw_json = router_match.group(1).strip().rstrip(";")
                 data = json.loads(raw_json)
-                # 寻找可能存在的路径
                 loader_data = data.get("loaderData", {})
                 for key, val in loader_data.items():
                     if isinstance(val, dict):
@@ -79,10 +100,10 @@ class DouyinParser:
                 pass
 
         # 模式 2: _SSR_DATA
-        ssr_match = re.search(r"window\._SSR_DATA\s*=\s*(.*?);\s*</script>", html)
+        ssr_match = re.search(r"window\._SSR_DATA\s*=\s*(.*?);\s*</script>", html, re.DOTALL)
         if ssr_match:
             try:
-                raw_json = ssr_match.group(1)
+                raw_json = ssr_match.group(1).strip().rstrip(";")
                 data = json.loads(raw_json)
                 item = data.get("itemInfo", {}).get("itemStruct")
                 if item:
@@ -90,7 +111,7 @@ class DouyinParser:
             except Exception:
                 pass
 
-        # 模式 3: RENDER_DATA (经过 URL 编码)
+        # 模式 3: RENDER_DATA
         render_match = re.search(r'<script id="RENDER_DATA" type="application/json">(.*?)</script>', html)
         if render_match:
             try:
@@ -104,25 +125,11 @@ class DouyinParser:
 
         return None
 
-    async def _fetch_from_api(self, client: httpx.AsyncClient, aweme_id: str) -> Optional[Dict[str, Any]]:
-        """备用方案：调用移动端旧版 API 获取详情"""
-        api_url = f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={aweme_id}"
-        try:
-            resp = await client.get(api_url, headers=self.headers, timeout=self.timeout)
-            data = resp.json()
-            item_list = data.get("item_list", [])
-            if item_list:
-                return item_list[0]
-        except Exception:
-            pass
-        return None
-
     async def _resolve_real_video_url(self, client: httpx.AsyncClient, video_url: str) -> str:
         """获取视频重定向后的真实 CDN 地址"""
         if not video_url:
             return ""
         try:
-            # 抖音无水印播放接口会自动 302 重定向到真实的 CDN 地址
             resp = await client.get(
                 video_url,
                 headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://www.douyin.com/"},
@@ -134,7 +141,7 @@ class DouyinParser:
             return video_url
 
     async def parse(self, text: str) -> Dict[str, Any]:
-        """核心解析函数"""
+        """核心解析入口"""
         url = self.extract_url(text)
         if not url:
             return {"success": False, "error": "未从输入内容中检测到有效的抖音链接"}
@@ -144,14 +151,17 @@ class DouyinParser:
             return {"success": False, "error": "未能解析出视频 ID，请确认链接是否有效"}
 
         async with httpx.AsyncClient(headers=self.headers, timeout=self.timeout) as client:
-            # 优先从移动端分享页提取数据
-            share_url = f"https://www.iesdouyin.com/share/video/{aweme_id}/"
-            resp = await client.get(share_url, follow_redirects=True)
-            item = self._extract_item_from_html(resp.text)
+            # 1. 优先调用客户端原生 Feed 接口（最稳定可靠）
+            item = await self._fetch_from_feed_api(client, aweme_id)
 
-            # 兜底请求 API
+            # 2. 备用策略：从分享页 SSR 数据提取
             if not item:
-                item = await self._fetch_from_api(client, aweme_id)
+                try:
+                    share_url = f"https://www.iesdouyin.com/share/video/{aweme_id}/"
+                    resp = await client.get(share_url, follow_redirects=True)
+                    item = self._extract_item_from_html(resp.text)
+                except Exception:
+                    pass
 
             if not item:
                 return {
@@ -166,10 +176,14 @@ class DouyinParser:
 
             # 作者信息
             author = item.get("author", {})
+            author_avatar = (
+                author.get("avatar_thumb", {}).get("url_list", [""])[0] 
+                or author.get("avatar_medium", {}).get("url_list", [""])[0]
+                or author.get("avatar_larger", {}).get("url_list", [""])[0]
+            )
             author_info = {
                 "nickname": author.get("nickname", "未知作者"),
-                "avatar": (author.get("avatar_thumb", {}).get("url_list", [""])[0] 
-                           or author.get("avatar_medium", {}).get("url_list", [""])[0]),
+                "avatar": author_avatar,
                 "unique_id": author.get("unique_id") or author.get("short_id") or "未知ID",
                 "signature": author.get("signature", ""),
             }
@@ -185,10 +199,12 @@ class DouyinParser:
 
             # 背景音乐
             music = item.get("music", {})
+            music_play = music.get("play_url", {}) if music else {}
+            music_url = music_play.get("url_list", [""])[0] if music_play else ""
             music_info = {
-                "title": music.get("title", ""),
-                "author": music.get("author", ""),
-                "url": music.get("play_url", {}).get("url_list", [""])[0] if music else "",
+                "title": music.get("title", "") if music else "",
+                "author": music.get("author", "") if music else "",
+                "url": music_url,
                 "cover": music.get("cover_large", {}).get("url_list", [""])[0] if music else "",
             }
 
@@ -225,7 +241,17 @@ class DouyinParser:
                 }
             else:
                 # 视频资源
-                play_url_list = video_info.get("play_addr", {}).get("url_list", [])
+                # 提取最优清晰度播放地址
+                bit_rate = video_info.get("bit_rate", [])
+                play_url_list = []
+                if bit_rate and isinstance(bit_rate, list) and len(bit_rate) > 0:
+                    # 优先取最高码率的 play_addr
+                    sorted_bitrate = sorted(bit_rate, key=lambda x: x.get("bit_rate", 0), reverse=True)
+                    play_url_list = sorted_bitrate[0].get("play_addr", {}).get("url_list", [])
+                
+                if not play_url_list:
+                    play_url_list = video_info.get("play_addr", {}).get("url_list", [])
+
                 raw_play_url = play_url_list[0] if play_url_list else ""
 
                 # 无水印地址：将 playwm 替换为 play
@@ -237,7 +263,7 @@ class DouyinParser:
                     or raw_play_url
                 )
 
-                # 解析出真实可直接播放/下载的无水印 CDN 直链
+                # 获取真实可直接播放/下载的 CDN 直链
                 real_nowm_url = await self._resolve_real_video_url(client, nowm_url) if nowm_url else ""
 
                 return {

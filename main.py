@@ -9,10 +9,12 @@ from pydantic import BaseModel
 import httpx
 from douyin import DouyinParser, DEFAULT_USER_AGENT
 
+APP_VERSION = "1.0.0.1001"
+
 app = FastAPI(
     title="抖音短视频/图集解析下载服务",
     description="轻量高效的抖音短视频、无水印/带水印视频、高清图集及音频解析与下载工具",
-    version="1.0.0",
+    version=APP_VERSION,
 )
 
 # 允许跨域请求
@@ -44,7 +46,7 @@ async def index():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "douyin-download"}
+    return {"status": "ok", "service": "douyin-download", "version": APP_VERSION}
 
 @app.post("/api/parse")
 async def parse_video(req: ParseRequest):

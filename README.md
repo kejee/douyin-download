@@ -1,6 +1,7 @@
 # 🎵 抖音短视频 & 图集在线解析下载 Web 平台 (Douyin Downloader)
 
 <p align="center">
+  <img src="https://img.shields.io/badge/version-v1.0.0.1001-blue.svg" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11+-blue.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/FastAPI-0.100+-green.svg" alt="FastAPI">
   <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg" alt="Docker Ready">

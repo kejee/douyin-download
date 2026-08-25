@@ -25,10 +25,7 @@
                 <div class="logo-icon">
                     <i class="fa-brands fa-tiktok"></i>
                 </div>
-                <div class="logo-text">
-                    <span class="logo-title">Douyin Parser</span>
-                    <span class="badge badge-pro">PRO</span>
-                </div>
+                <span class="logo-title">Douyin Parser</span>
             </div>
             <div class="header-nav">
                 <button class="nav-btn" id="openDisclaimerBtn" title="查看免责声明">
@@ -55,23 +52,25 @@
             <!-- 输入卡片 -->
             <section class="card input-card">
                 <div class="input-wrapper">
-                    <div class="input-icon">
-                        <i class="fa-solid fa-link"></i>
+                    <div class="input-header">
+                        <div class="input-icon">
+                            <i class="fa-solid fa-link"></i>
+                        </div>
+                        <div class="input-actions">
+                            <button id="pasteBtn" class="btn-secondary-sm" title="从剪贴板粘贴">
+                                <i class="fa-solid fa-paste"></i> 粘贴
+                            </button>
+                            <button id="clearBtn" class="btn-secondary-sm" title="清空输入" style="display: none;">
+                                <i class="fa-solid fa-xmark"></i> 清空
+                            </button>
+                        </div>
                     </div>
                     <textarea 
                         id="urlInput" 
                         class="url-input" 
                         placeholder="粘贴抖音分享文本或链接（例如：7.21 H@m.IO 复制打开抖音... https://v.douyin.com/xxxx/）"
-                        rows="2"
+                        rows="3"
                     ></textarea>
-                    <div class="input-actions">
-                        <button id="pasteBtn" class="btn-secondary-sm" title="从剪贴板粘贴">
-                            <i class="fa-solid fa-paste"></i> 粘贴
-                        </button>
-                        <button id="clearBtn" class="btn-secondary-sm" title="清空输入" style="display: none;">
-                            <i class="fa-solid fa-xmark"></i> 清空
-                        </button>
-                    </div>
                 </div>
 
                 <div class="parse-action-row">
@@ -104,12 +103,19 @@
         <!-- 底部免责声明横幅 -->
         <footer class="app-footer">
             <div class="disclaimer-bar">
-                <i class="fa-solid fa-circle-exclamation"></i>
-                <span><strong>免责声明：</strong>本工具仅供技术研究与个人学习交流使用，严禁用于任何商业用途或侵犯他人版权行为。</span>
-                <a href="javascript:void(0)" id="footerDisclaimerLink">查看详情</a>
+                <div class="disclaimer-content">
+                    <i class="fa-solid fa-circle-exclamation disclaimer-icon"></i>
+                    <span><strong>免责声明：</strong>本工具仅供技术研究与学习交流使用，严禁用于任何商业用途或侵犯他人版权。</span>
+                </div>
+                <a href="javascript:void(0)" id="footerDisclaimerLink" class="disclaimer-link">查看详情</a>
             </div>
-            <div class="footer-copy">
-                <span>© 2026 Douyin Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
+            <div class="footer-meta">
+                <div class="footer-copy">
+                    <span>© 2026 Douyin Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
+                </div>
+                <div class="footer-version">
+                    <span class="badge badge-version">v1.0.0.1001</span>
+                </div>
             </div>
         </footer>
     </div>

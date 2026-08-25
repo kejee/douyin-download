@@ -197,6 +197,19 @@ body {
     font-size: 16px;
 }
 
+.nav-btn-sponsor {
+    background: rgba(236, 72, 153, 0.12);
+    border: 1px solid rgba(236, 72, 153, 0.35);
+    color: #f472b6;
+}
+
+.nav-btn-sponsor:hover {
+    background: rgba(236, 72, 153, 0.22);
+    border-color: rgba(236, 72, 153, 0.6);
+    color: #fff;
+    box-shadow: 0 0 12px rgba(236, 72, 153, 0.3);
+}
+
 /* 主内容区域 */
 .main-content {
     flex: 1;
@@ -885,4 +898,75 @@ body {
 @keyframes toastFadeIn {
     from { opacity: 0; transform: translateY(-10px); }
     to { opacity: 1; transform: translateY(0); }
+}
+
+/* 广告与赞助商推荐卡片 */
+.ad-card-container {
+    padding: 16px 20px;
+    background: rgba(22, 28, 45, 0.5);
+    border: 1px dashed rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-lg);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.ad-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-dim);
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ad-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    font-size: 11px;
+}
+
+.ad-sponsor-link {
+    color: #f472b6;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    background: rgba(236, 72, 153, 0.1);
+    border: 1px solid rgba(236, 72, 153, 0.25);
+    border-radius: var(--radius-full);
+    transition: var(--transition);
+}
+
+.ad-sponsor-link:hover {
+    color: #fff;
+    background: rgba(236, 72, 153, 0.25);
+    border-color: rgba(236, 72, 153, 0.5);
+    transform: translateY(-1px);
+}
+
+.ad-banner-body {
+    width: 100%;
+    min-height: 90px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+}
+
+.ad-banner-body > div {
+    width: 100% !important;
+    display: flex !important;
+    justify-content: center !important;
 }

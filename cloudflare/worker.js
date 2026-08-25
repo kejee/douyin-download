@@ -89,7 +89,12 @@ export default {
       }
     }
 
-    // 首页欢迎信息
+    // 静态资源响应 (支持 Cloudflare Workers with Assets)
+    if (env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
+
+    // 默认 API 欢迎信息
     return new Response(
       "🚀 Douyin Downloader Cloudflare Worker API is running.\n\nEndpoints:\n- POST /api/parse\n- GET /api/download?url=...\n- GET /health",
       { headers: { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" } }

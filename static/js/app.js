@@ -1,4 +1,6 @@
 // 全局状态与 DOM 元素
+const API_BASE_URL = (window.API_BASE_URL || localStorage.getItem("API_BASE_URL") || "").replace(/\/+$/, "");
+
 const urlInput = document.getElementById("urlInput");
 const pasteBtn = document.getElementById("pasteBtn");
 const clearBtn = document.getElementById("clearBtn");
@@ -141,7 +143,7 @@ async function copyToClipboard(text, label = "链接") {
 
 // 触发代理下载
 function triggerDownload(url, filename) {
-    const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
+    const downloadUrl = `${API_BASE_URL}/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
     const a = document.createElement("a");
     a.href = downloadUrl;
     a.download = filename;
@@ -168,7 +170,7 @@ parseBtn.addEventListener("click", async () => {
     skeletonLoading.style.display = "grid";
 
     try {
-        const response = await fetch("/api/parse", {
+        const response = await fetch(`${API_BASE_URL}/api/parse`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",

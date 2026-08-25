@@ -91,6 +91,11 @@ export default {
 
     // 静态资源响应 (支持 Cloudflare Workers with Assets)
     if (env.ASSETS) {
+      if (url.pathname.startsWith("/static/")) {
+        const rewrittenUrl = new URL(request.url);
+        rewrittenUrl.pathname = url.pathname.replace(/^\/static/, "");
+        return env.ASSETS.fetch(new Request(rewrittenUrl.toString(), request));
+      }
       return env.ASSETS.fetch(request);
     }
 

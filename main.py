@@ -7,13 +7,14 @@ from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import httpx
-from douyin import DouyinParser, DEFAULT_USER_AGENT
+from extractors.router import UnifiedMediaRouter
+from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "1.0.0.1002"
+APP_VERSION = "2.0.0.0"
 
 app = FastAPI(
-    title="抖音短视频/图集解析下载服务",
-    description="轻量高效的抖音短视频、无水印/带水印视频、高清图集及音频解析与下载工具",
+    title="全网多平台短视频/图集解析与下载服务",
+    description="轻量高效的抖音、TikTok、小红书、快手、皮皮虾等无水印高清视频与图集解析工具",
     version=APP_VERSION,
 )
 
@@ -26,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-parser = DouyinParser()
+router = UnifiedMediaRouter()
 
 class ParseRequest(BaseModel):
     url: str
@@ -42,21 +43,21 @@ async def index():
     index_file = os.path.join(static_dir, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)
-    return HTMLResponse("<h1>抖音解析服务运行中，请检查前端静态资源文件。</h1>")
+    return HTMLResponse("<h1>多平台解析服务运行中，请检查前端静态资源文件。</h1>")
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "douyin-download", "version": APP_VERSION}
 
 @app.post("/api/parse")
-async def parse_video(req: ParseRequest):
-    """解析抖音分享链接或包含链接的文案"""
+async def parse_media(req: ParseRequest):
+    """解析抖音、小红书、快手、皮皮虾等多平台分享链接或文案"""
     if not req.url or not req.url.strip():
-        raise HTTPException(status_code=400, detail="请输入有效的抖音分享链接或文案")
+        raise HTTPException(status_code=400, detail="请输入有效的分享链接或文案")
     
-    result = await parser.parse(req.url.strip())
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "解析失败"))
+    result = await router.parse(req.url.strip())
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error or "解析失败")
     
     return result
 
@@ -65,7 +66,7 @@ async def proxy_download(
     url: str = Query(..., description="目标媒体直链"),
     filename: str = Query("media", description="保存的文件名"),
 ):
-    """代理流式下载媒体文件，突破跨域与防盗链限制"""
+    """多平台通用代理流式下载，突破跨域与各平台 CDN 防盗链"""
     if not url:
         raise HTTPException(status_code=400, detail="缺少 url 参数")
 
@@ -74,9 +75,18 @@ async def proxy_download(
     if not safe_filename:
         safe_filename = "download"
 
+    # 根据 CDN 域名自动适配 Referer
+    referer = "https://www.douyin.com/"
+    if "xhscdn.com" in url or "xiaohongshu.com" in url:
+        referer = "https://www.xiaohongshu.com/"
+    elif "kuaishou.com" in url or "gifshow.com" in url or "yximgs.com" in url:
+        referer = "https://www.kuaishou.com/"
+    elif "pipix.com" in url or "snssdk.com" in url:
+        referer = "https://h5.pipix.com/"
+
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
-        "Referer": "https://www.douyin.com/",
+        "Referer": referer,
     }
 
     async def stream_generator():
@@ -94,6 +104,10 @@ async def proxy_download(
         media_type = "video/mp4"
     elif safe_filename.endswith((".jpg", ".jpeg")):
         media_type = "image/jpeg"
+    elif safe_filename.endswith(".png"):
+        media_type = "image/png"
+    elif safe_filename.endswith(".webp"):
+        media_type = "image/webp"
     elif safe_filename.endswith(".mp3"):
         media_type = "audio/mpeg"
 
@@ -111,4 +125,4 @@ async def proxy_download(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main.py:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -155,7 +155,7 @@ function triggerDownload(url, filename) {
 parseBtn.addEventListener("click", async () => {
     const text = urlInput.value.trim();
     if (!text) {
-        showToast("请输入或粘贴抖音分享内容", "error");
+        showToast("请输入或粘贴分享文案或链接", "error");
         urlInput.focus();
         return;
     }
@@ -183,7 +183,7 @@ parseBtn.addEventListener("click", async () => {
         }
 
         renderResult(data);
-        showToast("解析成功！", "success");
+        showToast(`[${data.platform_name || '解析'}] 成功！`, "success");
     } catch (err) {
         showToast(err.message || "请求发生异常", "error");
     } finally {
@@ -196,8 +196,8 @@ parseBtn.addEventListener("click", async () => {
 
 // 渲染结果
 function renderResult(data) {
-    const { type, title, author, statistics, music, cover, video, images, id } = data;
-    const cleanTitle = title || `douyin_${id}`;
+    const { platform, platform_name, type, title, author, statistics, music, cover, video, images, id } = data;
+    const cleanTitle = title ? title.replace(/[\r\n]+/g, " ").slice(0, 60) : `${platform || 'media'}_${id}`;
 
     let mediaHtml = "";
     let actionsHtml = "";
@@ -220,26 +220,31 @@ function renderResult(data) {
             </div>
         `;
 
+        const isPipixia = platform === 'pipixia';
+        const isSingleStream = platform === 'pipixia' || platform === 'kuaishou' || platform === 'xhs';
+
         actionsHtml = `
             <div class="download-action-grid">
-                <button class="btn-primary grid-span-2" onclick="triggerDownload('${noWmUrl}', '${cleanTitle}_无水印.mp4')">
-                    <i class="fa-solid fa-download"></i> 下载无水印视频 (高清 MP4)
+                <button class="btn-primary grid-span-2" onclick="triggerDownload('${noWmUrl}', '${cleanTitle}_${isPipixia ? '高清' : '无水印'}.mp4')">
+                    <i class="fa-solid fa-download"></i> ${isPipixia ? '下载高清视频 (原画 MP4)' : '下载无水印视频 (高清 MP4)'}
                 </button>
+                ${!isSingleStream && wmUrl ? `
                 <button class="btn-secondary" onclick="triggerDownload('${wmUrl}', '${cleanTitle}_带水印.mp4')">
                     <i class="fa-solid fa-water"></i> 下载带水印视频
-                </button>
+                </button>` : ''}
                 ${music && music.url ? `
-                <button class="btn-secondary btn-outline-cyan" onclick="triggerDownload('${music.url}', '${cleanTitle}_原声.mp3')">
+                <button class="btn-secondary ${isSingleStream ? 'grid-span-2' : ''} btn-outline-cyan" onclick="triggerDownload('${music.url}', '${cleanTitle}_原声.mp3')">
                     <i class="fa-solid fa-music"></i> 提取背景音乐 MP3
                 </button>` : ''}
-                <button class="btn-secondary" onclick="copyToClipboard('${noWmUrl}', '无水印直链')">
-                    <i class="fa-regular fa-copy"></i> 复制无水印直链
+                <button class="btn-secondary ${isSingleStream && (!cover) ? 'grid-span-2' : ''}" onclick="copyToClipboard('${noWmUrl}', '${isPipixia ? '视频直链' : '无水印直链'}')">
+                    <i class="fa-regular fa-copy"></i> 复制${isPipixia ? '视频直链' : '无水印直链'}
                 </button>
+                ${!isSingleStream && wmUrl ? `
                 <button class="btn-secondary" onclick="copyToClipboard('${wmUrl}', '带水印直链')">
                     <i class="fa-regular fa-copy"></i> 复制带水印直链
-                </button>
+                </button>` : ''}
                 ${cover ? `
-                <button class="btn-secondary grid-span-2" onclick="triggerDownload('${cover}', '${cleanTitle}_封面.jpg')">
+                <button class="btn-secondary ${isSingleStream ? '' : 'grid-span-2'}" onclick="triggerDownload('${cover}', '${cleanTitle}_封面.jpg')">
                     <i class="fa-regular fa-image"></i> 下载高清视频封面
                 </button>` : ''}
                 <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d" target="_blank" rel="noopener noreferrer" class="btn-sponsor-cta grid-span-2" title="赞助推荐">
@@ -307,8 +312,11 @@ function renderResult(data) {
                 <div class="author-box">
                     <img class="author-avatar" src="${author.avatar || '/static/avatar-placeholder.png'}" alt="${author.nickname}" referrerpolicy="no-referrer" onerror="this.src='https://ui-avatars.com/api/?name=User&background=6366f1&color=fff'">
                     <div class="author-meta">
-                        <span class="author-name">${author.nickname}</span>
-                        <span class="author-id">抖音号：${author.unique_id}</span>
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span class="author-name">${author.nickname}</span>
+                            <span class="badge badge-version" style="font-size: 9px; padding: 1px 6px;">${platform_name || '短视频'}</span>
+                        </div>
+                        <span class="author-id">ID: ${author.unique_id}</span>
                     </div>
                 </div>
 
@@ -317,22 +325,31 @@ function renderResult(data) {
                 </div>
 
                 <div class="stats-grid">
-                    <div class="stat-item">
-                        <div class="stat-val">${formatNumber(statistics.digg_count)}</div>
-                        <div class="stat-label">获赞</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-val">${formatNumber(statistics.comment_count)}</div>
-                        <div class="stat-label">评论</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-val">${formatNumber(statistics.share_count)}</div>
-                        <div class="stat-label">分享</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-val">${type === 'images' ? '图集' : '视频'}</div>
-                        <div class="stat-label">类型</div>
-                    </div>
+                    ${(() => {
+                        const statsList = [];
+                        // 1. 获赞
+                        statsList.push({ label: "获赞", val: formatNumber(statistics.digg_count) });
+                        // 2. 评论
+                        statsList.push({ label: "评论", val: formatNumber(statistics.comment_count) });
+                        // 3. 播放量 (如快手/B站)
+                        if (statistics.play_count && statistics.play_count > 0) {
+                            statsList.push({ label: "播放量", val: formatNumber(statistics.play_count) });
+                        }
+                        // 4. 分享数 (若大于0则展示)
+                        if (statistics.share_count && statistics.share_count > 0) {
+                            statsList.push({ label: "分享", val: formatNumber(statistics.share_count) });
+                        }
+                        // 5. 类型
+                        const typeVal = type === 'images' ? `图集(${images ? images.length : 0}张)` : '视频';
+                        statsList.push({ label: "类型", val: typeVal });
+
+                        return statsList.map(item => `
+                            <div class="stat-item">
+                                <div class="stat-val">${item.val}</div>
+                                <div class="stat-label">${item.label}</div>
+                            </div>
+                        `).join("");
+                    })()}
                 </div>
 
                 ${actionsHtml}

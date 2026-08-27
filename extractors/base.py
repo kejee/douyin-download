@@ -60,6 +60,39 @@ class MediaResponse(BaseModel):
     create_time: int = 0
     error: Optional[str] = None
 
+class UserProfileInfo(BaseModel):
+    nickname: str = "未知博主"
+    avatar: str = ""
+    unique_id: str = ""
+    sec_uid: str = ""
+    signature: str = ""
+    follower_count: int = 0
+    total_favorited: int = 0
+    aweme_count: int = 0
+
+class UserPostItem(BaseModel):
+    id: str = Field(description="作品ID")
+    title: str = Field(default="", description="作品标题或文案")
+    cover: str = Field(default="", description="封面图")
+    type: str = Field(default="video", description="类型: video 或 images")
+    duration: int = Field(default=0, description="时长(秒)")
+    create_time: int = Field(default=0, description="发布时间戳")
+    digg_count: int = Field(default=0, description="点赞数")
+    comment_count: int = 0
+    download_url: str = Field(default="", description="默认高清下载链接/视频直链")
+    images: List[str] = Field(default_factory=list, description="若为图集则包含所有原图链接")
+    share_url: str = Field(default="", description="作品原网页链接")
+
+class UserProfileResponse(BaseModel):
+    success: bool = True
+    platform: str = Field(description="平台标识")
+    platform_name: str = Field(description="平台中文名")
+    user: UserProfileInfo = Field(default_factory=UserProfileInfo)
+    posts: List[UserPostItem] = Field(default_factory=list, description="作品列表")
+    has_more: bool = Field(default=False, description="是否还有更多作品")
+    max_cursor: int = Field(default=0, description="下一页分页游标")
+    error: Optional[str] = None
+
 class BaseExtractor(ABC):
     def __init__(self, timeout: float = 15.0):
         self.timeout = timeout
@@ -71,5 +104,14 @@ class BaseExtractor(ABC):
 
     @abstractmethod
     async def extract(self, url: str) -> MediaResponse:
-        """解析核心逻辑，返回统一的 MediaResponse"""
+        """解析单作品核心逻辑，返回统一的 MediaResponse"""
         pass
+
+    async def extract_user_posts(self, url: str, cursor: int = 0, count: int = 20) -> UserProfileResponse:
+        """解析博主主页与分页作品列表 (默认返回不支持提示)"""
+        return UserProfileResponse(
+            success=False,
+            platform="unknown",
+            platform_name="未知平台",
+            error="该平台暂未支持博主主页全量抓取功能",
+        )

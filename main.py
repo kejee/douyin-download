@@ -1,7 +1,10 @@
 import os
 import re
+import io
 import asyncio
+import zipfile
 import urllib.parse
+from typing import List, Optional
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
@@ -11,11 +14,11 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.0.1.3"
+APP_VERSION = "2.1.0.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
-    description="轻量高效的抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili) 等无水印/高清视频与图集解析工具",
+    description="轻量高效的抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili)、Twitter/X 等无水印/高清视频、图集与博主主页全量解析工具",
     version=APP_VERSION,
 )
 
@@ -32,6 +35,11 @@ router = UnifiedMediaRouter()
 
 class ParseRequest(BaseModel):
     url: str
+
+class UserPostsRequest(BaseModel):
+    url: str
+    cursor: int = 0
+    count: int = 20
 
 # 挂载静态文件
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -52,13 +60,25 @@ async def health_check():
 
 @app.post("/api/parse")
 async def parse_media(req: ParseRequest):
-    """解析抖音、小红书、快手、皮皮虾、B站等多平台分享链接或文案"""
+    """解析抖音、小红书、快手、皮皮虾、B站、Twitter等多平台单作品分享链接"""
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="请输入有效的分享链接或文案")
     
     result = await router.parse(req.url.strip())
     if not result.success:
         raise HTTPException(status_code=400, detail=result.error or "解析失败")
+    
+    return result
+
+@app.post("/api/user/posts")
+async def get_user_posts(req: UserPostsRequest):
+    """抓取博主主页元数据与分页作品列表"""
+    if not req.url or not req.url.strip():
+        raise HTTPException(status_code=400, detail="请输入有效的博主主页链接")
+    
+    result = await router.parse_user_profile(req.url.strip(), cursor=req.cursor, count=req.count)
+    if not result.success:
+        raise HTTPException(status_code=400, detail=result.error or "获取博主主页作品失败")
     
     return result
 
@@ -220,6 +240,63 @@ async def stream_mux_download(
             "Content-Disposition": content_disposition,
             "Access-Control-Allow-Origin": "*",
             "Accept-Ranges": "bytes",
+        },
+    )
+
+class BatchZipItem(BaseModel):
+    url: str
+    filename: str
+
+class BatchZipRequest(BaseModel):
+    zip_name: str = "batch_media"
+    items: List[BatchZipItem]
+
+@app.post("/api/batch/zip")
+async def batch_zip_download(req: BatchZipRequest):
+    """批量流式打包下载选中的视频/图片为 ZIP"""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="未选中任何下载文件")
+
+    # 限制单次打包最多 50 个文件，防止内存过载
+    items = req.items[:50]
+    safe_zip_name = re.sub(r'[\\/:*?"<>|\r\n]', '_', req.zip_name).strip() or "batch_media"
+    if not safe_zip_name.endswith(".zip"):
+        safe_zip_name += ".zip"
+
+    proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+
+    async def zip_stream_generator():
+        import io
+        import zipfile
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0, proxy=proxy) as client:
+                for idx, it in enumerate(items):
+                    try:
+                        headers = {"User-Agent": DEFAULT_USER_AGENT}
+                        if "douyin.com" in it.url or "iesdouyin.com" in it.url:
+                            headers["Referer"] = "https://www.douyin.com/"
+                        elif "xhscdn.com" in it.url:
+                            headers["Referer"] = "https://www.xiaohongshu.com/"
+                        elif "twimg.com" in it.url:
+                            headers["Referer"] = "https://twitter.com/"
+                        
+                        r = await client.get(it.url, headers=headers)
+                        if r.status_code == 200:
+                            f_name = re.sub(r'[\\/:*?"<>|\r\n]', '_', it.filename).strip() or f"media_{idx+1}.mp4"
+                            zf.writestr(f_name, r.content)
+                    except Exception:
+                        continue
+        zip_buffer.seek(0)
+        yield zip_buffer.getvalue()
+
+    encoded_zip_name = urllib.parse.quote(safe_zip_name)
+    return StreamingResponse(
+        zip_stream_generator(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_zip_name}",
+            "Access-Control-Allow-Origin": "*",
         },
     )
 

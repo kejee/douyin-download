@@ -28,7 +28,7 @@ class UnifiedMediaRouter:
         match = re.search(r"https?://[a-zA-Z0-9.\-_/%\?&=#+:~]+", text)
         return match.group(0) if match else None
 
-    async def parse(self, text: str) -> MediaResponse:
+    async def parse(self, text: str, sessdata: Optional[str] = None) -> MediaResponse:
         """核心路由与单作品解析入口"""
         url = self.clean_and_extract_url(text)
         if not url:
@@ -45,6 +45,8 @@ class UnifiedMediaRouter:
         # 遍历已注册解析器
         for extractor in self.extractors:
             if extractor.match(url):
+                if isinstance(extractor, BilibiliExtractor) and sessdata:
+                    return await extractor.extract(url, sessdata=sessdata)
                 return await extractor.extract(url)
 
         return MediaResponse(
@@ -57,24 +59,34 @@ class UnifiedMediaRouter:
             error="当前暂不支持该平台链接，已支持：抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili)、Twitter / X",
         )
 
-    async def parse_user_profile(self, text: str, cursor: int = 0, count: int = 20) -> UserProfileResponse:
-        """博主主页与全量作品抓取入口"""
+    async def parse_user_profile(self, text: str, cursor: int = 0, count: int = 20, sessdata: Optional[str] = None) -> UserProfileResponse:
+        """博主主页全量作品抓取分发路由"""
         url = self.clean_and_extract_url(text)
         if not url:
             return UserProfileResponse(
                 success=False,
                 platform="unknown",
                 platform_name="未知平台",
-                error="未从输入内容中检测到有效的博主主页链接",
+                error="未从输入内容中检测到有效的主页链接",
             )
 
         for extractor in self.extractors:
             if extractor.match(url):
-                return await extractor.extract_user_posts(url, cursor=cursor, count=count)
+                if hasattr(extractor, "extract_user_posts"):
+                    if isinstance(extractor, BilibiliExtractor) and sessdata:
+                        return await extractor.extract_user_posts(url, cursor=cursor, count=count, sessdata=sessdata)
+                    return await extractor.extract_user_posts(url, cursor=cursor, count=count)
+                else:
+                    return UserProfileResponse(
+                        success=False,
+                        platform=extractor.__class__.__name__.replace("Extractor", "").lower(),
+                        platform_name=extractor.__class__.__name__,
+                        error=f"该平台目前暂未开放主页作品批量抓取接口",
+                    )
 
         return UserProfileResponse(
             success=False,
             platform="unsupported",
             platform_name="暂不支持",
-            error="当前暂不支持该平台的博主主页抓取",
+            error="当前平台暂不支持主页批量抓取，目前支持：抖音/TikTok 博主主页、B站 UP 主主页",
         )

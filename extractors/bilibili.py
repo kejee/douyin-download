@@ -122,7 +122,7 @@ class BilibiliExtractor(BaseExtractor):
 
         return None
 
-    def _extract_via_ytdlp(self, target_url: str) -> Optional[Dict[str, Any]]:
+    def _extract_via_ytdlp(self, target_url: str, sessdata: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """利用 yt-dlp 深度提取免登录/登录 1080P/720P DASH 流与元数据"""
         if not yt_dlp:
             return None
@@ -133,7 +133,7 @@ class BilibiliExtractor(BaseExtractor):
                 "User-Agent": BILIBILI_DESKTOP_UA,
                 "Referer": "https://www.bilibili.com/",
             }
-            cookie = get_bilibili_cookie()
+            cookie = f"SESSDATA={sessdata}" if sessdata else get_bilibili_cookie()
             if cookie:
                 http_headers["Cookie"] = cookie
 
@@ -152,7 +152,7 @@ class BilibiliExtractor(BaseExtractor):
             logger.warning(f"[Bilibili] yt-dlp 提取异常 (将回退至官方接口通道): {e}")
             return None
 
-    async def extract(self, url: str) -> MediaResponse:
+    async def extract(self, url: str, sessdata: Optional[str] = None) -> MediaResponse:
         bvid = await self.get_bvid_or_aid(url)
         if not bvid:
             return MediaResponse(
@@ -166,11 +166,14 @@ class BilibiliExtractor(BaseExtractor):
             )
 
         video_page_url = f"https://www.bilibili.com/video/{bvid}"
+        custom_headers = dict(self.headers)
+        if sessdata:
+            custom_headers["Cookie"] = f"SESSDATA={sessdata}"
 
         # 并发获取官方 View 接口以获得 UP主真实高清头像与互动数据
         up_avatar = ""
         try:
-            async with httpx.AsyncClient(headers=self.headers, timeout=5.0) as client:
+            async with httpx.AsyncClient(headers=custom_headers, timeout=5.0) as client:
                 r_v = await client.get(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}")
                 if r_v.status_code == 200:
                     d_v = r_v.json().get("data", {})
@@ -180,7 +183,7 @@ class BilibiliExtractor(BaseExtractor):
 
         # 方案一：优先通过 yt-dlp 异步提取 1080P / 720P 最高画质与音频轨
         loop = asyncio.get_event_loop()
-        ytdl_info = await loop.run_in_executor(None, self._extract_via_ytdlp, video_page_url)
+        ytdl_info = await loop.run_in_executor(None, self._extract_via_ytdlp, video_page_url, sessdata)
 
         if ytdl_info:
             formats = ytdl_info.get("formats", [])
@@ -504,7 +507,7 @@ class BilibiliExtractor(BaseExtractor):
         except Exception:
             return []
 
-    async def extract_user_posts(self, url: str, cursor: int = 0, count: int = 20) -> UserProfileResponse:
+    async def extract_user_posts(self, url: str, cursor: int = 0, count: int = 20, sessdata: Optional[str] = None) -> UserProfileResponse:
         """抓取 B站 UP 主主页空间作品列表 (带分页游标)"""
         mid = await self.get_mid(url)
         if not mid:
@@ -522,6 +525,10 @@ class BilibiliExtractor(BaseExtractor):
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
             "Referer": f"https://m.bilibili.com/space/{mid}",
         }
+        if sessdata:
+            mobile_headers["Cookie"] = f"SESSDATA={sessdata}"
+        elif self.cookie:
+            mobile_headers["Cookie"] = self.cookie
 
         user_info = UserProfileInfo(
             sec_uid=mid,

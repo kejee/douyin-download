@@ -207,8 +207,40 @@ parseBtn.addEventListener("click", async () => {
     }
 });
 
-// 渲染结果
+// 模式切换
+function switchMode(mode) {
+    const singleTab = document.getElementById("tabSingleMode");
+    const creatorTab = document.getElementById("tabCreatorMode");
+    const singleInput = document.getElementById("singleInputCard");
+    const creatorInput = document.getElementById("creatorInputCard");
+    const resultCard = document.getElementById("resultCard");
+    const creatorResultCard = document.getElementById("creatorResultCard");
+
+    if (mode === "single") {
+        singleTab.classList.add("active");
+        creatorTab.classList.remove("active");
+        singleInput.style.display = "block";
+        creatorInput.style.display = "none";
+        creatorResultCard.style.display = "none";
+        if (window.currentMediaData) {
+            resultCard.style.display = "block";
+        }
+    } else {
+        creatorTab.classList.add("active");
+        singleTab.classList.remove("active");
+        creatorInput.style.display = "block";
+        singleInput.style.display = "none";
+        resultCard.style.display = "none";
+        if (window.currentCreatorData) {
+            creatorResultCard.style.display = "flex";
+        }
+    }
+}
+
+// 渲染单作品结果
 function renderResult(data) {
+    const resultCard = document.getElementById("resultCard");
+    if (resultCard) resultCard.style.display = "block";
     const { platform, platform_name, type, title, author, statistics, music, cover, video, images, id } = data;
     window.currentMediaData = data;
     const cleanTitle = title ? title.replace(/[\r\n]+/g, " ").slice(0, 60) : `${platform || 'media'}_${id}`;
@@ -517,4 +549,406 @@ function onQualitySelectChange(index) {
             player.src = q.video_url;
         }
     }
+}
+
+/* ==========================================================================
+   博主主页全量抓取与批量下载逻辑
+   ========================================================================== */
+const creatorUrlInput = document.getElementById("creatorUrlInput");
+const creatorPasteBtn = document.getElementById("creatorPasteBtn");
+const creatorClearBtn = document.getElementById("creatorClearBtn");
+const creatorParseBtn = document.getElementById("creatorParseBtn");
+const creatorResultCard = document.getElementById("creatorResultCard");
+const creatorProfileContainer = document.getElementById("creatorProfileContainer");
+const creatorBatchActionBar = document.getElementById("creatorBatchActionBar");
+const creatorPostsContainer = document.getElementById("creatorPostsContainer");
+const creatorLoadMoreContainer = document.getElementById("creatorLoadMoreContainer");
+const creatorLoadMoreBtn = document.getElementById("creatorLoadMoreBtn");
+
+window.currentCreatorData = null;
+window.selectedPostIds = new Set();
+
+// 博主模式输入框事件
+if (creatorUrlInput) {
+    creatorUrlInput.addEventListener("input", () => {
+        if (creatorUrlInput.value.trim().length > 0) {
+            creatorClearBtn.style.display = "inline-flex";
+        } else {
+            creatorClearBtn.style.display = "none";
+        }
+    });
+}
+
+if (creatorClearBtn) {
+    creatorClearBtn.addEventListener("click", () => {
+        creatorUrlInput.value = "";
+        creatorClearBtn.style.display = "none";
+        creatorUrlInput.focus();
+    });
+}
+
+if (creatorPasteBtn) {
+    creatorPasteBtn.addEventListener("click", async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text) {
+                creatorUrlInput.value = text;
+                creatorClearBtn.style.display = "inline-flex";
+                showToast("已从剪贴板粘贴主页链接", "success");
+            }
+        } catch (err) {
+            showToast("无法访问剪贴板，请手动粘贴", "error");
+        }
+    });
+}
+
+// 提交博主主页解析
+if (creatorParseBtn) {
+    creatorParseBtn.addEventListener("click", async () => {
+        const url = creatorUrlInput.value.trim();
+        if (!url) {
+            showToast("请先粘贴博主主页链接", "error");
+            creatorUrlInput.focus();
+            return;
+        }
+
+        creatorParseBtn.disabled = true;
+        creatorParseBtn.querySelector(".btn-text").style.display = "none";
+        creatorParseBtn.querySelector(".btn-loader").style.display = "inline-block";
+        creatorResultCard.style.display = "none";
+        skeletonLoading.style.display = "grid";
+
+        try {
+            const response = await fetch("/api/user/posts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url, cursor: 0, count: 20 }),
+            });
+
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.detail || data.error || "获取博主作品失败");
+            }
+
+            window.currentCreatorData = data;
+            window.selectedPostIds.clear();
+            
+            // 默认全选第一页作品
+            if (data.posts && data.posts.length > 0) {
+                data.posts.forEach(p => window.selectedPostIds.add(p.id));
+            }
+
+            renderCreatorView(data);
+            showToast(`成功获取博主 [${data.user ? data.user.nickname : '主页'}] 的作品！`, "success");
+        } catch (err) {
+            showToast(err.message || "抓取博主作品异常", "error");
+        } finally {
+            creatorParseBtn.disabled = false;
+            creatorParseBtn.querySelector(".btn-text").style.display = "inline-block";
+            creatorParseBtn.querySelector(".btn-loader").style.display = "none";
+            skeletonLoading.style.display = "none";
+        }
+    });
+}
+
+// 渲染博主主页完整视图
+function renderCreatorView(data) {
+    if (!data || !data.user) return;
+    const { user, platform_name, posts, has_more } = data;
+
+    // 1. 博主画像卡片
+    creatorProfileContainer.innerHTML = `
+        <div class="creator-profile-card">
+            <div class="creator-avatar-wrap">
+                <img class="creator-avatar" src="${user.avatar || '/static/avatar-placeholder.png'}" alt="${user.nickname}" referrerpolicy="no-referrer" onerror="this.src='https://ui-avatars.com/api/?name=User&background=6366f1&color=fff'">
+            </div>
+            <div class="creator-details">
+                <div class="creator-header-row">
+                    <span class="creator-name">${user.nickname}</span>
+                    <span class="badge badge-version" style="font-size: 10px; padding: 2px 8px;">${platform_name || '平台'}</span>
+                    ${user.unique_id ? `<span class="author-id" style="font-size: 11px;">ID: ${user.unique_id}</span>` : ''}
+                </div>
+                ${user.signature ? `<div class="creator-signature">${user.signature}</div>` : ''}
+                <div class="creator-stats-row">
+                    <div class="creator-stat-box">
+                        <div class="creator-stat-num">${formatNumber(user.aweme_count || (posts ? posts.length : 0))}</div>
+                        <div class="creator-stat-title">作品总数</div>
+                    </div>
+                    <div class="creator-stat-box">
+                        <div class="creator-stat-num">${formatNumber(user.total_favorited)}</div>
+                        <div class="creator-stat-title">获赞总计</div>
+                    </div>
+                    <div class="creator-stat-box">
+                        <div class="creator-stat-num">${formatNumber(user.follower_count)}</div>
+                        <div class="creator-stat-title">粉丝数量</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // 2. 批量操作工具栏
+    renderCreatorActionBar();
+
+    // 3. 作品列表网格
+    renderCreatorPosts(posts, false);
+
+    // 4. 加载更多按钮
+    if (has_more) {
+        creatorLoadMoreContainer.style.display = "block";
+    } else {
+        creatorLoadMoreContainer.style.display = "none";
+    }
+
+    creatorResultCard.style.display = "flex";
+    creatorResultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// 渲染批量操作工具条
+function renderCreatorActionBar() {
+    const totalCount = window.currentCreatorData && window.currentCreatorData.posts ? window.currentCreatorData.posts.length : 0;
+    const selCount = window.selectedPostIds.size;
+
+    creatorBatchActionBar.innerHTML = `
+        <div class="batch-action-bar">
+            <div class="batch-controls-left">
+                <button class="btn-secondary-sm" onclick="selectAllPosts(true)" title="全部勾选">
+                    <i class="fa-solid fa-check-double"></i> 全选 (${totalCount})
+                </button>
+                <button class="btn-secondary-sm" onclick="selectAllPosts(false)" title="全部取消">
+                    <i class="fa-regular fa-square"></i> 取消全选
+                </button>
+                <span class="selected-count-badge">已勾选 ${selCount} 项</span>
+            </div>
+            <div class="batch-btn-group">
+                <button class="btn-primary btn-sm" onclick="batchDownloadZip()" title="打包为 ZIP 下载" style="padding: 6px 14px; font-size: 12.5px;">
+                    <i class="fa-solid fa-file-zipper"></i> 一键打包 ZIP
+                </button>
+                <button class="btn-secondary-sm btn-outline-cyan" onclick="batchDownloadDirect()" title="依次调用浏览器下载" style="padding: 6px 14px; font-size: 12.5px;">
+                    <i class="fa-solid fa-bolt"></i> 批量极速保存
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+// 渲染作品矩阵
+function renderCreatorPosts(posts, isAppend = false) {
+    if (!posts || posts.length === 0) {
+        if (!isAppend) {
+            creatorPostsContainer.innerHTML = `
+                <div style="text-align: center; color: var(--text-muted); padding: 36px 16px; background: rgba(15, 23, 42, 0.4); border-radius: var(--radius-sm); border: 1px dashed var(--border-color);">
+                    <i class="fa-solid fa-layer-group" style="font-size: 32px; color: var(--text-dim); margin-bottom: 12px;"></i>
+                    <div style="font-size: 14px; font-weight: 600; color: var(--text-main); margin-bottom: 6px;">已成功获取该博主画像与粉丝获赞数据</div>
+                    <div style="font-size: 12px; color: var(--text-dim);">抖音近期对全量作品列表接口实施了防爬风控限制，您可以切换至「单作品解析」复制该博主任意单个视频链接进行秒级无水印解析与高清原图下载。</div>
+                </div>
+            `;
+        }
+        return;
+    }
+
+    const cardsHtml = posts.map(post => {
+        const isSelected = window.selectedPostIds.has(post.id);
+        const isImages = post.type === "images";
+        const dateStr = post.create_time ? new Date(post.create_time * 1000).toLocaleDateString() : "";
+        const durStr = post.duration ? formatDuration(post.duration) : "";
+
+        return `
+            <div class="post-card ${isSelected ? 'is-selected' : ''}" id="post_card_${post.id}" onclick="togglePostSelect('${post.id}')">
+                <div class="post-thumb-wrap">
+                    <img class="post-thumb" src="${post.cover || '/static/avatar-placeholder.png'}" alt="${post.title}" loading="lazy" referrerpolicy="no-referrer">
+                    <div class="post-checkbox">
+                        <i class="fa-solid fa-check"></i>
+                    </div>
+                    <div class="post-type-badge">
+                        ${isImages ? `<i class="fa-regular fa-images"></i> 图集` : `<i class="fa-solid fa-play"></i> 视频`}
+                    </div>
+                    <div class="post-stat-bottom">
+                        <span><i class="fa-regular fa-heart"></i> ${formatNumber(post.digg_count)}</span>
+                        ${durStr ? `<span>${durStr}</span>` : ''}
+                    </div>
+                </div>
+                <div class="post-info-meta">
+                    <div class="post-title-text" title="${post.title || '无标题'}">
+                        ${post.title || '抖音精选作品'}
+                    </div>
+                    <div class="post-action-row">
+                        <span class="post-date-tag">${dateStr}</span>
+                        <button class="btn-post-dl" onclick="event.stopPropagation(); triggerDownload('${post.download_url}', '${(post.title || post.id).replace(/[\r\n]+/g, ' ').slice(0, 30)}.${isImages ? 'jpg' : 'mp4'}')">
+                            <i class="fa-solid fa-download"></i> 保存
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join("");
+
+    if (isAppend) {
+        const grid = creatorPostsContainer.querySelector(".creator-posts-grid");
+        if (grid) {
+            grid.insertAdjacentHTML("beforeend", cardsHtml);
+        }
+    } else {
+        creatorPostsContainer.innerHTML = `
+            <div class="creator-posts-grid">
+                ${cardsHtml}
+            </div>
+        `;
+    }
+}
+
+// 切换单项选择状态
+function togglePostSelect(id) {
+    const card = document.getElementById(`post_card_${id}`);
+    if (window.selectedPostIds.has(id)) {
+        window.selectedPostIds.delete(id);
+        if (card) card.classList.remove("is-selected");
+    } else {
+        window.selectedPostIds.add(id);
+        if (card) card.classList.add("is-selected");
+    }
+    renderCreatorActionBar();
+}
+
+// 全选或全不选
+function selectAllPosts(selectAll = true) {
+    if (!window.currentCreatorData || !window.currentCreatorData.posts) return;
+    window.currentCreatorData.posts.forEach(p => {
+        const card = document.getElementById(`post_card_${p.id}`);
+        if (selectAll) {
+            window.selectedPostIds.add(p.id);
+            if (card) card.classList.add("is-selected");
+        } else {
+            window.selectedPostIds.delete(p.id);
+            if (card) card.classList.remove("is-selected");
+        }
+    });
+    renderCreatorActionBar();
+}
+
+// 一键打包 ZIP 下载
+async function batchDownloadZip() {
+    if (window.selectedPostIds.size === 0) {
+        showToast("请先勾选需要下载的作品", "error");
+        return;
+    }
+    if (!window.currentCreatorData || !window.currentCreatorData.posts) return;
+
+    const selectedPosts = window.currentCreatorData.posts.filter(p => window.selectedPostIds.has(p.id));
+    const items = [];
+    selectedPosts.forEach((p, idx) => {
+        if (p.download_url) {
+            const ext = p.type === "images" ? "jpg" : "mp4";
+            const safeTitle = (p.title || `post_${p.id}`).replace(/[\r\n\\/:*?"<>|]/g, "_").slice(0, 30);
+            items.push({
+                url: p.download_url,
+                filename: `${idx + 1}_${safeTitle}.${ext}`
+            });
+        }
+    });
+
+    if (items.length === 0) {
+        showToast("选中的作品暂无可下载链接", "error");
+        return;
+    }
+
+    const creatorName = (window.currentCreatorData.user && window.currentCreatorData.user.nickname) || "creator";
+    const zipName = `${creatorName}_作品合集_${items.length}项.zip`;
+
+    showToast(`正在启动流式 ZIP 打包引擎，正在打包 ${items.length} 个作品...`, "info");
+
+    try {
+        const response = await fetch("/api/batch/zip", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ zip_name: zipName, items }),
+        });
+
+        if (!response.ok) {
+            throw new Error("打包下载异常");
+        }
+
+        const blob = await response.blob();
+        const blobUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = zipName;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
+
+        showToast("ZIP 打包下载完成！", "success");
+    } catch (err) {
+        showToast("打包下载失败: " + err.message, "error");
+    }
+}
+
+// 批量极速并发下载
+function batchDownloadDirect() {
+    if (window.selectedPostIds.size === 0) {
+        showToast("请先勾选需要下载的作品", "error");
+        return;
+    }
+    if (!window.currentCreatorData || !window.currentCreatorData.posts) return;
+
+    const selectedPosts = window.currentCreatorData.posts.filter(p => window.selectedPostIds.has(p.id));
+    showToast(`正在依次触发 ${selectedPosts.length} 个作品保存...`, "info");
+
+    selectedPosts.forEach((p, idx) => {
+        setTimeout(() => {
+            const ext = p.type === "images" ? "jpg" : "mp4";
+            const safeTitle = (p.title || `post_${p.id}`).replace(/[\r\n\\/:*?"<>|]/g, "_").slice(0, 30);
+            triggerDownload(p.download_url, `${safeTitle}.${ext}`);
+        }, idx * 500);
+    });
+}
+
+// 加载更多博主作品 (分页)
+if (creatorLoadMoreBtn) {
+    creatorLoadMoreBtn.addEventListener("click", async () => {
+        if (!window.currentCreatorData) return;
+        const { max_cursor } = window.currentCreatorData;
+        const url = creatorUrlInput.value.trim();
+
+        creatorLoadMoreBtn.disabled = true;
+        creatorLoadMoreBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> 正在加载更多...`;
+
+        try {
+            const response = await fetch("/api/user/posts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url, cursor: max_cursor, count: 20 }),
+            });
+
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.detail || data.error || "加载更多作品失败");
+            }
+
+            // 追加到全局数据中
+            if (data.posts && data.posts.length > 0) {
+                window.currentCreatorData.posts.push(...data.posts);
+                window.currentCreatorData.max_cursor = data.max_cursor;
+                window.currentCreatorData.has_more = data.has_more;
+
+                // 默认勾选新加载项
+                data.posts.forEach(p => window.selectedPostIds.add(p.id));
+
+                renderCreatorPosts(data.posts, true);
+                renderCreatorActionBar();
+            }
+
+            if (!data.has_more) {
+                creatorLoadMoreContainer.style.display = "none";
+                showToast("已加载该博主的全部公开作品！", "info");
+            }
+        } catch (err) {
+            showToast(err.message || "加载更多失败", "error");
+        } finally {
+            creatorLoadMoreBtn.disabled = false;
+            creatorLoadMoreBtn.innerHTML = `<i class="fa-solid fa-chevron-down"></i> 加载更多作品`;
+        }
+    });
 }

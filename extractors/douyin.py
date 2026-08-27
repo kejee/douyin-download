@@ -11,6 +11,9 @@ from extractors.base import (
     StatisticsInfo,
     MusicInfo,
     VideoInfo,
+    UserProfileResponse,
+    UserProfileInfo,
+    UserPostItem,
 )
 
 APP_USER_AGENT = (
@@ -348,4 +351,158 @@ class DouyinExtractor(BaseExtractor):
                     duration=duration,
                 ),
                 create_time=create_time,
+            )
+
+    async def get_sec_uid(self, url: str) -> Optional[str]:
+        """从 URL 或重定向地址中提取抖音博主的 sec_uid"""
+        # 1. 直接匹配 URL 中的 sec_uid 或 user/ 路径
+        sec_match = re.search(r"sec_uid=([^&]+)", url) or re.search(r"sec_user_id=([^&]+)", url)
+        if sec_match:
+            return urllib.parse.unquote(sec_match.group(1))
+
+        user_match = re.search(r"/user/([A-Za-z0-9_\-]+)", url)
+        if user_match:
+            return user_match.group(1)
+
+        # 2. 跟随短链接重定向 (如 https://v.douyin.com/xxxx/)
+        try:
+            async with httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=self.timeout) as client:
+                resp = await client.get(url)
+                final_url = str(resp.url)
+                
+                sec_match = re.search(r"sec_uid=([^&]+)", final_url) or re.search(r"sec_user_id=([^&]+)", final_url)
+                if sec_match:
+                    return urllib.parse.unquote(sec_match.group(1))
+
+                user_match = re.search(r"/user/([A-Za-z0-9_\-]+)", final_url)
+                if user_match:
+                    return user_match.group(1)
+                
+                # 从 HTML 页面中匹配 sec_uid
+                html_sec = re.search(r'"sec_uid"\s*:\s*"([^"]+)"', resp.text) or re.search(r'secUid\\":\\"([^"\\]+)\\"', resp.text)
+                if html_sec:
+                    return html_sec.group(1)
+        except Exception:
+            pass
+
+        return None
+
+    async def extract_user_posts(self, url: str, cursor: int = 0, count: int = 20) -> UserProfileResponse:
+        """抓取博主主页元数据与分页作品列表"""
+        sec_uid = await self.get_sec_uid(url)
+        if not sec_uid:
+            return UserProfileResponse(
+                success=False,
+                platform="douyin",
+                platform_name="抖音",
+                error="无法识别博主主页中的 sec_uid，请提供如 https://www.douyin.com/user/... 或手机分享的博主主页短链",
+            )
+
+        user_info = UserProfileInfo(sec_uid=sec_uid)
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            # 1. 优先调用官方公开 user/info 接口获取博主画像
+            try:
+                user_info_url = f"https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid={sec_uid}"
+                headers = {
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    "Referer": f"https://www.iesdouyin.com/share/user/{sec_uid}",
+                }
+                r_user = await client.get(user_info_url, headers=headers)
+                if r_user.status_code == 200 and r_user.text:
+                    u_data = r_user.json().get("user_info", {})
+                    if u_data:
+                        user_info.nickname = u_data.get("nickname", "抖音博主")
+                        user_info.unique_id = u_data.get("unique_id") or str(u_data.get("short_id", ""))
+                        user_info.signature = u_data.get("signature", "")
+                        
+                        avatar_dict = u_data.get("avatar_medium") or u_data.get("avatar_larger") or u_data.get("avatar_thumb", {})
+                        if avatar_dict and "url_list" in avatar_dict and len(avatar_dict["url_list"]) > 0:
+                            user_info.avatar = avatar_dict["url_list"][0]
+                            
+                        user_info.follower_count = u_data.get("mplatform_followers_count") or u_data.get("follower_count") or 0
+                        user_info.total_favorited = u_data.get("total_favorited") or 0
+                        user_info.aweme_count = u_data.get("aweme_count") or 0
+            except Exception:
+                pass
+
+            # 2. 尝试拉取作品列表
+            post_api_urls = [
+                f"https://www.iesdouyin.com/web/api/v2/aweme/post/?sec_uid={sec_uid}&count={count}&max_cursor={cursor}&aid=1128&_signature=1",
+                f"https://api5-normal-c-lq.amemv.com/aweme/v1/aweme/post/?sec_user_id={sec_uid}&count={count}&max_cursor={cursor}&aid=1128",
+                f"https://aweme.snssdk.com/aweme/v1/aweme/post/?sec_user_id={sec_uid}&count={count}&max_cursor={cursor}&aid=1128",
+            ]
+
+            data = None
+            for ep in post_api_urls:
+                try:
+                    headers = self.headers if "iesdouyin" in ep else self.app_headers
+                    resp = await client.get(ep, headers=headers)
+                    if resp.status_code == 200 and resp.text:
+                        res_json = resp.json()
+                        if res_json and "aweme_list" in res_json:
+                            data = res_json
+                            break
+                except Exception:
+                    continue
+
+            aweme_list = data.get("aweme_list", []) if data else []
+            has_more = bool(data.get("has_more", 0)) if data else False
+            max_cursor = int(data.get("max_cursor", 0)) if data else 0
+
+            # 解析每一个作品列表项
+            posts: List[UserPostItem] = []
+            for item in aweme_list:
+                aid = str(item.get("aweme_id", ""))
+                desc = item.get("desc", "")
+                create_time = item.get("create_time", 0)
+                statistics = item.get("statistics", {})
+                digg_count = statistics.get("digg_count", 0)
+                comment_count = statistics.get("comment_count", 0)
+                
+                # 判断是视频还是图文
+                images_list: List[str] = []
+                images_data = item.get("images")
+                if images_data and isinstance(images_data, list) and len(images_data) > 0:
+                    item_type = "images"
+                    for img in images_data:
+                        url_list = img.get("url_list", [])
+                        if url_list:
+                            images_list.append(url_list[0])
+                    cover_url = images_list[0] if images_list else ""
+                    download_url = images_list[0] if images_list else ""
+                    duration = 0
+                else:
+                    item_type = "video"
+                    video_data = item.get("video", {})
+                    cover_data = video_data.get("cover", {})
+                    cover_url = cover_data.get("url_list", [""])[0] if cover_data.get("url_list") else ""
+                    duration = int(video_data.get("duration", 0) / 1000) if video_data.get("duration") else 0
+                    
+                    play_addr = video_data.get("play_addr", {})
+                    raw_video_url = play_addr.get("url_list", [""])[0] if play_addr.get("url_list") else ""
+                    download_url = raw_video_url.replace("playwm", "play")
+
+                posts.append(UserPostItem(
+                    id=aid,
+                    title=desc,
+                    cover=cover_url,
+                    type=item_type,
+                    duration=duration,
+                    create_time=create_time,
+                    digg_count=digg_count,
+                    comment_count=comment_count,
+                    download_url=download_url,
+                    images=images_list,
+                    share_url=f"https://www.douyin.com/video/{aid}",
+                ))
+
+            return UserProfileResponse(
+                success=True,
+                platform="douyin",
+                platform_name="抖音",
+                user=user_info,
+                posts=posts,
+                has_more=has_more,
+                max_cursor=max_cursor,
             )

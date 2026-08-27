@@ -11,7 +11,7 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.0.0.8"
+APP_VERSION = "2.0.0.9"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -86,14 +86,18 @@ async def proxy_download(
         referer = "https://h5.pipix.com/"
     elif "bilibili.com" in url or "bilivideo.cn" in url or "bilivideo.com" in url or "hdslb.com" in url:
         referer = "https://www.bilibili.com/"
+    elif "twimg.com" in url or "twitter.com" in url or "x.com" in url:
+        referer = "https://twitter.com/"
 
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
         "Referer": referer,
     }
 
+    proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+
     async def stream_generator():
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=60.0) as client:
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=60.0, proxy=proxy) as client:
             async with client.stream("GET", url) as response:
                 if response.status_code != 200:
                     yield b""

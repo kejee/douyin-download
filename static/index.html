@@ -15,7 +15,7 @@
         rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.2.1.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.2.2.6">
 </head>
 
 <body>
@@ -108,6 +108,9 @@
                         rows="3"></textarea>
                 </div>
 
+                <!-- B站专属感知助手条 (单作品模式) -->
+                <div id="biliHelperBar" class="bili-helper-bar" style="display: none;"></div>
+
                 <div class="action-row">
                     <button id="parseBtn" class="btn-primary btn-block">
                         <span class="btn-text">
@@ -137,17 +140,20 @@
                         </div>
                     </div>
                     <textarea id="creatorUrlInput" class="url-input"
-                        placeholder="粘贴抖音/B站(哔哩哔哩)博主或UP主主页链接 (如 https://space.bilibili.com/946974 或抖音主页分享短链) 全量抓取历史投稿..."
-                        rows="3"></textarea>
+                        placeholder="粘贴 抖音博主主页 或 B站 UP 主主页分享链接 (如 https://space.bilibili.com/946974 或短链)..."
+                        rows="2"></textarea>
                 </div>
+
+                <!-- B站专属感知助手条 (博主抓取模式) -->
+                <div id="biliCreatorHelperBar" class="bili-helper-bar" style="display: none;"></div>
 
                 <div class="action-row">
                     <button id="creatorParseBtn" class="btn-primary btn-block">
                         <span class="btn-text">
-                            <i class="fa-solid fa-cloud-arrow-down"></i> 抓取博主全部作品
+                            <i class="fa-solid fa-cloud-arrow-down"></i> 抓取博主/UP主全部作品
                         </span>
                         <span class="btn-loader" style="display: none;">
-                            <i class="fa-solid fa-circle-notch fa-spin"></i> 正在扫描抓取作品中...
+                            <i class="fa-solid fa-circle-notch fa-spin"></i> 正在全量抓取博主数据...
                         </span>
                     </button>
                 </div>
@@ -163,12 +169,10 @@
                 </div>
             </div>
 
-            <!-- 解析结果展示卡片 (单作品) -->
-            <section class="card result-card" id="resultCard" style="display: none;">
-                <div id="resultContainer"></div>
-            </section>
+            <!-- 单作品解析结果展示卡片 -->
+            <section class="card result-card" id="resultContainer" style="display: none;"></section>
 
-            <!-- 博主主页抓取结果展示卡片 (全量作品矩阵) -->
+            <!-- 博主主页全量作品抓取展示区 -->
             <section class="card creator-result-card" id="creatorResultCard" style="display: none;">
                 <div id="creatorProfileContainer"></div>
                 <div id="creatorBatchActionBar"></div>
@@ -211,10 +215,61 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.2.1.0</span>
+                    <span class="badge badge-version">v2.2.2.6</span>
                 </div>
             </div>
         </footer>
+    </div>
+
+    <!-- B站 SESSDATA 专属画质配置模态弹窗 -->
+    <div class="modal-overlay" id="biliConfigModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fa-solid fa-tv text-gradient"></i> 哔哩哔哩 (Bilibili) 画质增强设置
+                </div>
+                <button class="modal-close" id="closeBiliModalBtn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="bili-modal-tip">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span>B站官方对未登录访客仅开放 480P 画质。配置任意 B 站免费普通账号的 <code>SESSDATA</code> 即可解锁 <strong>1080P 高码率原画</strong>；配置大会员账号可解锁 <strong>4K/8K 超清</strong>。</span>
+                </div>
+
+                <div class="form-group" style="margin-top: 16px;">
+                    <label class="form-label" for="biliSessdataInput">
+                        <span>B站 SESSDATA 凭证</span>
+                        <a href="javascript:void(0)" id="toggleBiliGuideBtn" class="link-cyan" style="font-size: 12px;">如何获取？</a>
+                    </label>
+                    <div class="input-with-action">
+                        <input type="password" id="biliSessdataInput" class="form-input" placeholder="粘贴您的 B站 SESSDATA (如: 6f8e7d2a...)">
+                        <button type="button" class="btn-toggle-eye" id="toggleSessdataEyeBtn" title="查看/隐藏明文">
+                            <i class="fa-regular fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 折叠教程 -->
+                <div class="bili-guide-box" id="biliGuideBox" style="display: none;">
+                    <div class="guide-step"><strong>第 1 步：</strong>在电脑浏览器打开并登录 <a href="https://www.bilibili.com" target="_blank" class="link-cyan">bilibili.com</a>；</div>
+                    <div class="guide-step"><strong>第 2 步：</strong>按 <code>F12</code>（或右键“检查”），切换到 <code>Application (应用程序) -> Cookies -> bilibili.com</code>；</div>
+                    <div class="guide-step"><strong>第 3 步：</strong>找到 <code>SESSDATA</code> 条目，复制其 Value 值粘贴到上方输入框保存即可。</div>
+                </div>
+                
+                <div class="bili-security-note">
+                    <i class="fa-solid fa-shield-halved"></i> 凭证仅保存在您本地浏览器的 LocalStorage 中，仅用于向官方接口请求 1080P/4K 视频流，绝对安全。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-danger-ghost" id="clearBiliModalBtn" title="清除已保存的凭证">
+                    <i class="fa-regular fa-trash-can"></i> 清除凭证
+                </button>
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn-secondary-sm" id="cancelBiliModalBtn">取消</button>
+                    <button class="btn-primary-sm" id="saveBiliModalBtn">保存并生效</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 免责声明模态弹窗 -->
@@ -248,7 +303,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.2.1.0"></script>
+    <script src="/static/js/app.js?v=2.2.2.6"></script>
 </body>
 
 </html>

@@ -14,7 +14,7 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.2.1.0"
+APP_VERSION = "2.2.2.6"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -35,11 +35,13 @@ router = UnifiedMediaRouter()
 
 class ParseRequest(BaseModel):
     url: str
+    sessdata: Optional[str] = None
 
 class UserPostsRequest(BaseModel):
     url: str
     cursor: int = 0
     count: int = 20
+    sessdata: Optional[str] = None
 
 # 挂载静态文件
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -64,7 +66,7 @@ async def parse_media(req: ParseRequest):
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="请输入有效的分享链接或文案")
     
-    result = await router.parse(req.url.strip())
+    result = await router.parse(req.url.strip(), sessdata=req.sessdata)
     if not result.success:
         raise HTTPException(status_code=400, detail=result.error or "解析失败")
     
@@ -76,7 +78,7 @@ async def get_user_posts(req: UserPostsRequest):
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="请输入有效的博主主页链接")
     
-    result = await router.parse_user_profile(req.url.strip(), cursor=req.cursor, count=req.count)
+    result = await router.parse_user_profile(req.url.strip(), cursor=req.cursor, count=req.count, sessdata=req.sessdata)
     if not result.success:
         raise HTTPException(status_code=400, detail=result.error or "获取博主主页作品失败")
     

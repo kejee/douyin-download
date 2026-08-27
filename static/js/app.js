@@ -34,19 +34,76 @@ function showToast(message, type = "info", duration = 3000) {
     }, duration);
 }
 
-// 监听输入框变化
+// B站 SESSDATA 凭证管理
+function getBiliSessdata() {
+    return (localStorage.getItem("bili_sessdata") || "").trim();
+}
+
+function setBiliSessdata(val) {
+    if (val && val.trim()) {
+        localStorage.setItem("bili_sessdata", val.trim());
+    } else {
+        localStorage.removeItem("bili_sessdata");
+    }
+    updateBiliHelperBars();
+}
+
+function clearBiliSessdata() {
+    localStorage.removeItem("bili_sessdata");
+    updateBiliHelperBars();
+}
+
+// 检查输入是否为 B站链接并更新专属胶囊提示栏 (方案 1)
+function checkBiliInput(text, barElement) {
+    if (!barElement) return;
+    const isBili = text && (text.includes("bilibili.com") || text.includes("b23.tv") || text.includes("bili2233.cn") || /BV[a-zA-Z0-9]{10}/i.test(text));
+    if (isBili) {
+        barElement.style.display = "flex";
+        const hasSess = !!getBiliSessdata();
+        if (hasSess) {
+            barElement.innerHTML = `
+                <div class="bili-helper-left">
+                    <i class="fa-solid fa-tv" style="color: #10b981;"></i>
+                    <span style="color: #10b981; font-weight: 500;">B站画质通道：🟢 已解锁 1080P/4K 高清</span>
+                </div>
+                <button type="button" class="btn-text-muted" onclick="openBiliModal()">修改/清除</button>
+            `;
+        } else {
+            barElement.innerHTML = `
+                <div class="bili-helper-left">
+                    <i class="fa-solid fa-tv text-gradient"></i>
+                    <span>B站画质提示：当前为访客画质 (最高480P)</span>
+                </div>
+                <button type="button" class="btn-text-cyan" onclick="openBiliModal()">⚙️ 配置 SESSDATA 解锁 1080P/4K</button>
+            `;
+        }
+    } else {
+        barElement.style.display = "none";
+    }
+}
+
+function updateBiliHelperBars() {
+    const biliHelperBar = document.getElementById("biliHelperBar");
+    const biliCreatorHelperBar = document.getElementById("biliCreatorHelperBar");
+    if (urlInput) checkBiliInput(urlInput.value, biliHelperBar);
+    if (creatorUrlInput) checkBiliInput(creatorUrlInput.value, biliCreatorHelperBar);
+}
+
+// 监听单作品与博主输入框变化
 urlInput.addEventListener("input", () => {
     if (urlInput.value.trim().length > 0) {
         clearBtn.style.display = "inline-flex";
     } else {
         clearBtn.style.display = "none";
     }
+    checkBiliInput(urlInput.value, document.getElementById("biliHelperBar"));
 });
 
 // 清空按钮
 clearBtn.addEventListener("click", () => {
     urlInput.value = "";
     clearBtn.style.display = "none";
+    checkBiliInput("", document.getElementById("biliHelperBar"));
     urlInput.focus();
 });
 
@@ -57,6 +114,7 @@ pasteBtn.addEventListener("click", async () => {
         if (text) {
             urlInput.value = text;
             clearBtn.style.display = "inline-flex";
+            checkBiliInput(text, document.getElementById("biliHelperBar"));
             showToast("已从剪贴板粘贴内容", "success");
         } else {
             showToast("剪贴板为空", "info");
@@ -65,6 +123,78 @@ pasteBtn.addEventListener("click", async () => {
         showToast("无法访问剪贴板，请手动粘贴", "error");
     }
 });
+
+// B站配置弹窗逻辑
+const biliConfigModal = document.getElementById("biliConfigModal");
+const biliSessdataInput = document.getElementById("biliSessdataInput");
+const toggleBiliGuideBtn = document.getElementById("toggleBiliGuideBtn");
+const biliGuideBox = document.getElementById("biliGuideBox");
+const toggleSessdataEyeBtn = document.getElementById("toggleSessdataEyeBtn");
+const closeBiliModalBtn = document.getElementById("closeBiliModalBtn");
+const cancelBiliModalBtn = document.getElementById("cancelBiliModalBtn");
+const saveBiliModalBtn = document.getElementById("saveBiliModalBtn");
+const clearBiliModalBtn = document.getElementById("clearBiliModalBtn");
+
+function openBiliModal() {
+    if (!biliConfigModal) return;
+    biliSessdataInput.value = getBiliSessdata();
+    biliConfigModal.classList.add("active");
+}
+
+function closeBiliModal() {
+    if (!biliConfigModal) return;
+    biliConfigModal.classList.remove("active");
+}
+
+if (closeBiliModalBtn) closeBiliModalBtn.addEventListener("click", closeBiliModal);
+if (cancelBiliModalBtn) cancelBiliModalBtn.addEventListener("click", closeBiliModal);
+if (biliConfigModal) {
+    biliConfigModal.addEventListener("click", (e) => {
+        if (e.target === biliConfigModal) closeBiliModal();
+    });
+}
+
+if (toggleBiliGuideBtn && biliGuideBox) {
+    toggleBiliGuideBtn.addEventListener("click", () => {
+        const isHidden = biliGuideBox.style.display === "none";
+        biliGuideBox.style.display = isHidden ? "block" : "none";
+        toggleBiliGuideBtn.textContent = isHidden ? "收起教程" : "如何获取？";
+    });
+}
+
+if (toggleSessdataEyeBtn && biliSessdataInput) {
+    toggleSessdataEyeBtn.addEventListener("click", () => {
+        const isPwd = biliSessdataInput.type === "password";
+        biliSessdataInput.type = isPwd ? "text" : "password";
+        toggleSessdataEyeBtn.innerHTML = isPwd ? `<i class="fa-regular fa-eye-slash"></i>` : `<i class="fa-regular fa-eye"></i>`;
+    });
+}
+
+if (saveBiliModalBtn) {
+    saveBiliModalBtn.addEventListener("click", () => {
+        const val = biliSessdataInput.value.trim();
+        setBiliSessdata(val);
+        closeBiliModal();
+        if (val) {
+            showToast("B站 SESSDATA 凭证保存成功！已启用 1080P/4K 高清画质通道", "success");
+            // 如果当前已有单作品解析输入且为 B站，自动刷新重新解析
+            if (urlInput && urlInput.value && (urlInput.value.includes("bilibili.com") || urlInput.value.includes("b23.tv"))) {
+                parseBtn.click();
+            }
+        } else {
+            showToast("已清空 SESSDATA 凭证，恢复为默认访客画质", "info");
+        }
+    });
+}
+
+if (clearBiliModalBtn) {
+    clearBiliModalBtn.addEventListener("click", () => {
+        biliSessdataInput.value = "";
+        clearBiliSessdata();
+        closeBiliModal();
+        showToast("已清除 B站 SESSDATA 凭证", "info");
+    });
+}
 
 // 弹窗逻辑
 function openDisclaimer() {
@@ -181,12 +311,16 @@ parseBtn.addEventListener("click", async () => {
     skeletonLoading.style.display = "grid";
 
     try {
+        const sessdata = getBiliSessdata();
+        const payload = { url: text };
+        if (sessdata) payload.sessdata = sessdata;
+
         const response = await fetch("/api/parse", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
             },
-            body: JSON.stringify({ url: text }),
+            body: JSON.stringify(payload),
         });
 
         const data = await response.json();
@@ -213,33 +347,34 @@ function switchMode(mode) {
     const creatorTab = document.getElementById("tabCreatorMode");
     const singleInput = document.getElementById("singleInputCard");
     const creatorInput = document.getElementById("creatorInputCard");
-    const resultCard = document.getElementById("resultCard");
+    const resultCard = document.getElementById("resultContainer");
     const creatorResultCard = document.getElementById("creatorResultCard");
 
     if (mode === "single") {
         singleTab.classList.add("active");
         creatorTab.classList.remove("active");
-        singleInput.style.display = "block";
+        singleInput.style.display = "flex";
         creatorInput.style.display = "none";
         creatorResultCard.style.display = "none";
-        if (window.currentMediaData) {
+        if (window.currentMediaData && resultCard) {
             resultCard.style.display = "block";
         }
     } else {
         creatorTab.classList.add("active");
         singleTab.classList.remove("active");
-        creatorInput.style.display = "block";
+        creatorInput.style.display = "flex";
         singleInput.style.display = "none";
-        resultCard.style.display = "none";
-        if (window.currentCreatorData) {
+        if (resultCard) resultCard.style.display = "none";
+        if (window.currentCreatorData && creatorResultCard) {
             creatorResultCard.style.display = "flex";
         }
     }
+    updateBiliHelperBars();
 }
 
 // 渲染单作品结果
 function renderResult(data) {
-    const resultCard = document.getElementById("resultCard");
+    const resultCard = document.getElementById("resultContainer");
     if (resultCard) resultCard.style.display = "block";
     const { platform, platform_name, type, title, author, statistics, music, cover, video, images, id } = data;
     window.currentMediaData = data;
@@ -306,12 +441,18 @@ function renderResult(data) {
 
         // 多画质下拉选择器 (支持 B站 与 Twitter 等)
         let qualitySelectorHtml = "";
-        if (video.qualities && video.qualities.length > 1) {
-            const optionsHtml = video.qualities.map((q, idx) => `
+        if (video.qualities && video.qualities.length > 0) {
+            let optionsHtml = video.qualities.map((q, idx) => `
                 <option value="${idx}" ${idx === 0 ? 'selected' : ''}>
                     ${q.label}
                 </option>
             `).join("");
+
+            // 方案 2: 若为 B站 且未配置 SESSDATA，在画质下拉框引导解锁
+            if (isBilibili && !getBiliSessdata()) {
+                optionsHtml += `<option value="__unlock_1080p__" style="color: #38bdf8; font-weight: 600;">🔒 解锁 1080P/4K 原画画质...</option>`;
+            }
+
             qualitySelectorHtml = `
                 <div class="quality-selector-box">
                     <span class="quality-selector-label"><i class="fa-solid fa-sliders"></i> 画质选择:</span>
@@ -517,6 +658,13 @@ function triggerMuxDownload(videoUrl, audioUrl, filename) {
 
 // 响应画质下拉框切换
 function onQualitySelectChange(index) {
+    if (index === "__unlock_1080p__") {
+        openBiliModal();
+        const sel = document.getElementById("qualitySelect");
+        if (sel) sel.value = "0";
+        return;
+    }
+
     if (!window.currentMediaData || !window.currentMediaData.video || !window.currentMediaData.video.qualities) return;
     const data = window.currentMediaData;
     const q = data.video.qualities[index];
@@ -557,7 +705,7 @@ function onQualitySelectChange(index) {
 const creatorUrlInput = document.getElementById("creatorUrlInput");
 const creatorPasteBtn = document.getElementById("creatorPasteBtn");
 const creatorClearBtn = document.getElementById("creatorClearBtn");
-const creatorParseBtn = document.getElementById("creatorParseBtn");
+const creatorParseBtn = document.getElementById("creatorParseBtn") || document.getElementById("creatorFetchBtn");
 const creatorResultCard = document.getElementById("creatorResultCard");
 const creatorProfileContainer = document.getElementById("creatorProfileContainer");
 const creatorBatchActionBar = document.getElementById("creatorBatchActionBar");
@@ -576,6 +724,7 @@ if (creatorUrlInput) {
         } else {
             creatorClearBtn.style.display = "none";
         }
+        checkBiliInput(creatorUrlInput.value, document.getElementById("biliCreatorHelperBar"));
     });
 }
 
@@ -583,6 +732,7 @@ if (creatorClearBtn) {
     creatorClearBtn.addEventListener("click", () => {
         creatorUrlInput.value = "";
         creatorClearBtn.style.display = "none";
+        checkBiliInput("", document.getElementById("biliCreatorHelperBar"));
         creatorUrlInput.focus();
     });
 }
@@ -594,6 +744,7 @@ if (creatorPasteBtn) {
             if (text) {
                 creatorUrlInput.value = text;
                 creatorClearBtn.style.display = "inline-flex";
+                checkBiliInput(text, document.getElementById("biliCreatorHelperBar"));
                 showToast("已从剪贴板粘贴主页链接", "success");
             }
         } catch (err) {
@@ -619,10 +770,14 @@ if (creatorParseBtn) {
         skeletonLoading.style.display = "grid";
 
         try {
+            const sessdata = getBiliSessdata();
+            const payload = { url, cursor: 0, count: 20 };
+            if (sessdata) payload.sessdata = sessdata;
+
             const response = await fetch("/api/user/posts", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ url, cursor: 0, count: 20 }),
+                body: JSON.stringify(payload),
             });
 
             const data = await response.json();
@@ -704,10 +859,19 @@ function renderCreatorView(data) {
     creatorResultCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
-// 渲染批量操作工具条
+window.currentBatchQuality = "highest";
+
+// 渲染批量操作工具条 (保持用户选择的画质锁定)
 function renderCreatorActionBar() {
     const totalCount = window.currentCreatorData && window.currentCreatorData.posts ? window.currentCreatorData.posts.length : 0;
     const selCount = window.selectedPostIds.size;
+
+    // 获取当前已有下拉框的值，避免被重置
+    const existingSelect = document.getElementById("batchQualitySelect");
+    if (existingSelect && existingSelect.value) {
+        window.currentBatchQuality = existingSelect.value;
+    }
+    const currentQ = window.currentBatchQuality || "highest";
 
     creatorBatchActionBar.innerHTML = `
         <div class="batch-action-bar">
@@ -723,10 +887,10 @@ function renderCreatorActionBar() {
             <div class="batch-btn-group">
                 <div class="batch-quality-wrapper" title="选择批量保存时的期望画质">
                     <i class="fa-solid fa-sliders"></i>
-                    <select id="batchQualitySelect" class="select-quality-sm">
-                        <option value="highest" selected>🔥 最高画质 (1080P/原画)</option>
-                        <option value="720p">🎬 720P 高清</option>
-                        <option value="480p">📱 480P 清晰 (省流)</option>
+                    <select id="batchQualitySelect" class="select-quality-sm" onchange="window.currentBatchQuality = this.value">
+                        <option value="highest" ${currentQ === 'highest' ? 'selected' : ''}>🔥 最高画质 (1080P/原画)</option>
+                        <option value="720p" ${currentQ === '720p' ? 'selected' : ''}>🎬 720P 高清</option>
+                        <option value="480p" ${currentQ === '480p' ? 'selected' : ''}>📱 480P 清晰 (省流)</option>
                     </select>
                 </div>
                 <button class="btn-primary btn-sm" onclick="batchDownloadDirect()" title="依次调用浏览器下载选中的作品" style="padding: 7px 18px; font-size: 13px;">
@@ -779,7 +943,7 @@ function renderCreatorPosts(posts, isAppend = false) {
                     </div>
                     <div class="post-action-row">
                         <span class="post-date-tag">${dateStr}</span>
-                        <button class="btn-post-dl" onclick="event.stopPropagation(); downloadPostItem(window.currentCreatorData.posts.find(p => p.id === '${post.id}'))">
+                        <button class="btn-post-dl" onclick="event.stopPropagation(); downloadPostItem(window.currentCreatorData.posts.find(p => p.id === '${post.id}'), window.currentBatchQuality || 'highest')" title="按当前选定画质下载">
                             <i class="fa-solid fa-download"></i> 保存
                         </button>
                     </div>
@@ -802,8 +966,8 @@ function renderCreatorPosts(posts, isAppend = false) {
     }
 }
 
-// 针对单个博主作品下载 (自动适配画质选择与多平台)
-async function downloadPostItem(post, targetQuality = "highest") {
+// 针对单个博主作品下载 (自动联动当前选定的期望画质)
+async function downloadPostItem(post, targetQuality = (window.currentBatchQuality || "highest")) {
     if (!post) return;
     const isImages = post.type === "images";
     const ext = isImages ? "jpg" : "mp4";
@@ -817,10 +981,14 @@ async function downloadPostItem(post, targetQuality = "highest") {
         showToast(`正在获取 [${safeTitle.slice(0, 12)}...] 高清媒体流...`, "info");
         try {
             const reqUrl = isBili ? `https://www.bilibili.com/video/${post.id}` : post.download_url;
+            const sessdata = getBiliSessdata();
+            const payload = { url: reqUrl };
+            if (sessdata) payload.sessdata = sessdata;
+
             const resp = await fetch("/api/parse", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ url: reqUrl })
+                body: JSON.stringify(payload)
             });
             const data = await resp.json();
             if (data.success && data.video) {
@@ -920,10 +1088,14 @@ if (creatorLoadMoreBtn) {
         creatorLoadMoreBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> 正在加载更多...`;
 
         try {
+            const sessdata = getBiliSessdata();
+            const payload = { url, cursor: max_cursor, count: 20 };
+            if (sessdata) payload.sessdata = sessdata;
+
             const response = await fetch("/api/user/posts", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ url, cursor: max_cursor, count: 20 }),
+                body: JSON.stringify(payload),
             });
 
             const data = await response.json();
@@ -956,3 +1128,8 @@ if (creatorLoadMoreBtn) {
         }
     });
 }
+
+// 页面初始化
+document.addEventListener("DOMContentLoaded", () => {
+    updateBiliHelperBars();
+});

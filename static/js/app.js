@@ -721,10 +721,15 @@ function renderCreatorActionBar() {
                 <span class="selected-count-badge">已勾选 ${selCount} 项</span>
             </div>
             <div class="batch-btn-group">
-                <button class="btn-primary btn-sm" onclick="batchDownloadZip()" title="打包为 ZIP 下载" style="padding: 6px 14px; font-size: 12.5px;">
-                    <i class="fa-solid fa-file-zipper"></i> 一键打包 ZIP
-                </button>
-                <button class="btn-secondary-sm btn-outline-cyan" onclick="batchDownloadDirect()" title="依次调用浏览器下载" style="padding: 6px 14px; font-size: 12.5px;">
+                <div class="batch-quality-wrapper" title="选择批量保存时的期望画质">
+                    <i class="fa-solid fa-sliders"></i>
+                    <select id="batchQualitySelect" class="select-quality-sm">
+                        <option value="highest" selected>🔥 最高画质 (1080P/原画)</option>
+                        <option value="720p">🎬 720P 高清</option>
+                        <option value="480p">📱 480P 清晰 (省流)</option>
+                    </select>
+                </div>
+                <button class="btn-primary btn-sm" onclick="batchDownloadDirect()" title="依次调用浏览器下载选中的作品" style="padding: 7px 18px; font-size: 13px;">
                     <i class="fa-solid fa-bolt"></i> 批量极速保存
                 </button>
             </div>
@@ -770,11 +775,11 @@ function renderCreatorPosts(posts, isAppend = false) {
                 </div>
                 <div class="post-info-meta">
                     <div class="post-title-text" title="${post.title || '无标题'}">
-                        ${post.title || '抖音精选作品'}
+                        ${post.title || '精选作品'}
                     </div>
                     <div class="post-action-row">
                         <span class="post-date-tag">${dateStr}</span>
-                        <button class="btn-post-dl" onclick="event.stopPropagation(); triggerDownload('${post.download_url}', '${(post.title || post.id).replace(/[\r\n]+/g, ' ').slice(0, 30)}.${isImages ? 'jpg' : 'mp4'}')">
+                        <button class="btn-post-dl" onclick="event.stopPropagation(); downloadPostItem(window.currentCreatorData.posts.find(p => p.id === '${post.id}'))">
                             <i class="fa-solid fa-download"></i> 保存
                         </button>
                     </div>
@@ -795,6 +800,62 @@ function renderCreatorPosts(posts, isAppend = false) {
             </div>
         `;
     }
+}
+
+// 针对单个博主作品下载 (自动适配画质选择与多平台)
+async function downloadPostItem(post, targetQuality = "highest") {
+    if (!post) return;
+    const isImages = post.type === "images";
+    const ext = isImages ? "jpg" : "mp4";
+    const safeTitle = (post.title || post.id).replace(/[\r\n\\/:*?"<>|]/g, "_").slice(0, 40);
+
+    // 如果是 B 站视频 / Twitter 视频，调用 /api/parse 提取匹配画质并触发混流下载
+    const isBili = post.id && (post.id.startsWith("BV") || post.id.startsWith("bv") || (post.download_url && post.download_url.includes("bilibili.com")));
+    const isTwitter = post.download_url && (post.download_url.includes("twitter.com") || post.download_url.includes("x.com"));
+
+    if (isBili || isTwitter) {
+        showToast(`正在获取 [${safeTitle.slice(0, 12)}...] 高清媒体流...`, "info");
+        try {
+            const reqUrl = isBili ? `https://www.bilibili.com/video/${post.id}` : post.download_url;
+            const resp = await fetch("/api/parse", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url: reqUrl })
+            });
+            const data = await resp.json();
+            if (data.success && data.video) {
+                const qualities = data.video.qualities || [];
+                let chosenQ = null;
+
+                if (qualities.length > 0) {
+                    if (targetQuality === "highest") {
+                        chosenQ = qualities[0];
+                    } else if (targetQuality === "720p") {
+                        chosenQ = qualities.find(q => (q.width >= 1280 || q.height >= 720 || q.label.includes("720P"))) || qualities[0];
+                    } else if (targetQuality === "480p") {
+                        chosenQ = qualities.find(q => (q.width <= 1056 || q.height <= 480 || q.label.includes("480P"))) || qualities[qualities.length - 1];
+                    } else {
+                        chosenQ = qualities[0];
+                    }
+                }
+
+                const vUrl = chosenQ ? chosenQ.video_url : data.video.no_watermark_url;
+                const aUrl = chosenQ ? chosenQ.audio_url : data.video.audio_url;
+
+                if (isBili && aUrl) {
+                    triggerMuxDownload(vUrl, aUrl, `${safeTitle}.mp4`);
+                } else {
+                    triggerDownload(vUrl, `${safeTitle}.mp4`);
+                }
+                return;
+            }
+        } catch (e) {
+            console.error("解析视频异常:", e);
+        }
+    }
+
+    // 默认直接代理下载
+    triggerDownload(post.download_url, `${safeTitle}.${ext}`);
 }
 
 // 切换单项选择状态
@@ -826,66 +887,7 @@ function selectAllPosts(selectAll = true) {
     renderCreatorActionBar();
 }
 
-// 一键打包 ZIP 下载
-async function batchDownloadZip() {
-    if (window.selectedPostIds.size === 0) {
-        showToast("请先勾选需要下载的作品", "error");
-        return;
-    }
-    if (!window.currentCreatorData || !window.currentCreatorData.posts) return;
-
-    const selectedPosts = window.currentCreatorData.posts.filter(p => window.selectedPostIds.has(p.id));
-    const items = [];
-    selectedPosts.forEach((p, idx) => {
-        if (p.download_url) {
-            const ext = p.type === "images" ? "jpg" : "mp4";
-            const safeTitle = (p.title || `post_${p.id}`).replace(/[\r\n\\/:*?"<>|]/g, "_").slice(0, 30);
-            items.push({
-                url: p.download_url,
-                filename: `${idx + 1}_${safeTitle}.${ext}`
-            });
-        }
-    });
-
-    if (items.length === 0) {
-        showToast("选中的作品暂无可下载链接", "error");
-        return;
-    }
-
-    const creatorName = (window.currentCreatorData.user && window.currentCreatorData.user.nickname) || "creator";
-    const zipName = `${creatorName}_作品合集_${items.length}项.zip`;
-
-    showToast(`正在启动流式 ZIP 打包引擎，正在打包 ${items.length} 个作品...`, "info");
-
-    try {
-        const response = await fetch("/api/batch/zip", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ zip_name: zipName, items }),
-        });
-
-        if (!response.ok) {
-            throw new Error("打包下载异常");
-        }
-
-        const blob = await response.blob();
-        const blobUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = blobUrl;
-        a.download = zipName;
-        a.style.display = "none";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(blobUrl);
-
-        showToast("ZIP 打包下载完成！", "success");
-    } catch (err) {
-        showToast("打包下载失败: " + err.message, "error");
-    }
-}
-
-// 批量极速并发下载
+// 批量极速并发下载 (带画质选择)
 function batchDownloadDirect() {
     if (window.selectedPostIds.size === 0) {
         showToast("请先勾选需要下载的作品", "error");
@@ -893,15 +895,17 @@ function batchDownloadDirect() {
     }
     if (!window.currentCreatorData || !window.currentCreatorData.posts) return;
 
+    const qualitySelect = document.getElementById("batchQualitySelect");
+    const targetQuality = qualitySelect ? qualitySelect.value : "highest";
+    const qualityLabel = qualitySelect ? qualitySelect.options[qualitySelect.selectedIndex].text.split(" ")[1] || "最高画质" : "最高画质";
+
     const selectedPosts = window.currentCreatorData.posts.filter(p => window.selectedPostIds.has(p.id));
-    showToast(`正在依次触发 ${selectedPosts.length} 个作品保存...`, "info");
+    showToast(`正在按 [${qualityLabel}] 依次触发 ${selectedPosts.length} 个作品保存...`, "info");
 
     selectedPosts.forEach((p, idx) => {
         setTimeout(() => {
-            const ext = p.type === "images" ? "jpg" : "mp4";
-            const safeTitle = (p.title || `post_${p.id}`).replace(/[\r\n\\/:*?"<>|]/g, "_").slice(0, 30);
-            triggerDownload(p.download_url, `${safeTitle}.${ext}`);
-        }, idx * 500);
+            downloadPostItem(p, targetQuality);
+        }, idx * 1000);
     });
 }
 

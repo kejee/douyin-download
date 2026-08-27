@@ -1641,6 +1641,34 @@ body {
     padding: 3px 10px;
 }
 
+.batch-quality-wrapper {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(15, 23, 42, 0.7);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 3px 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.select-quality-sm {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #38bdf8;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 3px 2px;
+}
+
+.select-quality-sm option {
+    background: #0f172a;
+    color: #e2e8f0;
+}
+
 /* ==========================================================================
    作品矩阵瀑布流 (Post Grid)
    ========================================================================== */

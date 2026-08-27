@@ -129,12 +129,39 @@ class DouyinExtractor(BaseExtractor):
                                 if m_uid:
                                     author_id = m_uid.group(1)
 
-                            # 点赞互动数据
+                            # 互动统计数据 (点赞、评论、分享)
                             digg_count = 0
-                            if isinstance(author_raw, dict):
-                                for stat in author_raw.get("interactionStatistic", []):
+                            # 1. 优先提取作品自身的获赞数
+                            root_stats = data.get("interactionStatistic", [])
+                            if isinstance(root_stats, list):
+                                for stat in root_stats:
                                     if "LikeAction" in str(stat.get("interactionType", "")):
                                         digg_count = int(stat.get("userInteractionCount", 0) or 0)
+                            
+                            # 2. 如果根级未找到，从描述文案或作者数据提取
+                            if digg_count == 0:
+                                desc_str = data.get("description", "")
+                                m_like = re.search(r"已经收获了(\d+)个喜欢", desc_str)
+                                if m_like:
+                                    digg_count = int(m_like.group(1))
+                                elif isinstance(author_raw, dict):
+                                    for stat in author_raw.get("interactionStatistic", []):
+                                        if "LikeAction" in str(stat.get("interactionType", "")):
+                                            digg_count = int(stat.get("userInteractionCount", 0) or 0)
+
+                            comment_count = int(data.get("commentCount", 0) or len(data.get("comment", [])) or 0)
+                            share_count = int(data.get("repostCount", 0) or data.get("shareCount", 0) or 0)
+
+                            # 解析发布时间
+                            create_time = 0
+                            pub_str = data.get("datePublished", "")
+                            if pub_str:
+                                try:
+                                    from datetime import datetime
+                                    dt = datetime.strptime(pub_str, "%Y-%m-%d %H:%M")
+                                    create_time = int(dt.timestamp())
+                                except Exception:
+                                    create_time = 0
 
                             return MediaResponse(
                                 success=True,
@@ -151,10 +178,13 @@ class DouyinExtractor(BaseExtractor):
                                 ),
                                 statistics=StatisticsInfo(
                                     digg_count=digg_count,
+                                    comment_count=comment_count,
+                                    share_count=share_count,
                                 ),
                                 music=MusicInfo(),
                                 images=images,
                                 image_count=len(images),
+                                create_time=create_time,
                             )
                     except Exception:
                         continue

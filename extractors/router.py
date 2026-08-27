@@ -6,6 +6,7 @@ from extractors.xiaohongshu import XiaohongshuExtractor
 from extractors.kuaishou import KuaishouExtractor
 from extractors.pipixia import PipixiaExtractor
 from extractors.bilibili import BilibiliExtractor
+from extractors.twitter import TwitterExtractor
 
 class UnifiedMediaRouter:
     def __init__(self):
@@ -16,6 +17,7 @@ class UnifiedMediaRouter:
             KuaishouExtractor(),
             PipixiaExtractor(),
             BilibiliExtractor(),
+            TwitterExtractor(),
         ]
 
     @staticmethod
@@ -52,5 +54,5 @@ class UnifiedMediaRouter:
             type="video",
             id="",
             title="",
-            error="当前暂不支持该平台链接，已支持：抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili)",
+            error="当前暂不支持该平台链接，已支持：抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili)、Twitter / X",
         )

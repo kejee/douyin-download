@@ -222,7 +222,8 @@ function renderResult(data) {
 
         const isPipixia = platform === 'pipixia';
         const isBilibili = platform === 'bilibili';
-        const isSingleStream = platform === 'pipixia' || platform === 'kuaishou' || platform === 'xhs' || isBilibili;
+        const isTwitter = platform === 'twitter';
+        const isSingleStream = platform === 'pipixia' || platform === 'kuaishou' || platform === 'xhs' || isBilibili || isTwitter;
 
         const audioUrl = video.audio_url || (music && music.url ? music.url : "");
 
@@ -261,15 +262,15 @@ function renderResult(data) {
 
         const primaryBtnClick = isBilibili && audioUrl
             ? `triggerMuxDownload('${noWmUrl}', '${audioUrl}', '${cleanTitle}_完整高清.mp4')`
-            : `triggerDownload('${noWmUrl}', '${cleanTitle}_${isPipixia ? '高清' : (isBilibili ? '高清' : '无水印')}.mp4')`;
+            : `triggerDownload('${noWmUrl}', '${cleanTitle}_${isPipixia ? '高清' : (isBilibili ? '高清' : (isTwitter ? '高清' : '无水印'))}.mp4')`;
 
         const primaryBtnTitle = isBilibili 
             ? `下载高清视频 (${video.ratio || '1080P'} 带声音 MP4)` 
-            : (isPipixia ? '下载高清视频 (原画 MP4)' : '下载无水印视频 (高清 MP4)');
+            : (isPipixia || isTwitter ? `下载高清视频 (${video.ratio || '高清'} MP4)` : '下载无水印视频 (高清 MP4)');
 
-        // B站多画质下拉选择器
+        // 多画质下拉选择器 (支持 B站 与 Twitter 等)
         let qualitySelectorHtml = "";
-        if (isBilibili && video.qualities && video.qualities.length > 1) {
+        if (video.qualities && video.qualities.length > 1) {
             const optionsHtml = video.qualities.map((q, idx) => `
                 <option value="${idx}" ${idx === 0 ? 'selected' : ''}>
                     ${q.label}
@@ -362,6 +363,20 @@ function renderResult(data) {
                     </div>
                     <span class="sponsor-cta-btn">立即查看 <i class="fa-solid fa-arrow-up-right-from-square"></i></span>
                 </a>
+            </div>
+        `;
+    } else if (type === "text") {
+        mediaHtml = `
+            <div class="media-preview-container" style="aspect-ratio: auto; height: 160px; padding: 20px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;">
+                <i class="fa-brands fa-x-twitter" style="font-size: 36px; color: #38bdf8; margin-bottom: 10px;"></i>
+                <span style="font-size: 13px; color: var(--text-muted);">推文纯文本内容已解析</span>
+            </div>
+        `;
+        actionsHtml = `
+            <div class="download-action-grid">
+                <button class="btn-primary grid-span-2" onclick="copyToClipboard('${cleanTitle}', '推文正文')">
+                    <i class="fa-regular fa-copy"></i> 复制推文完整正文
+                </button>
             </div>
         `;
     }
@@ -462,24 +477,35 @@ function triggerMuxDownload(videoUrl, audioUrl, filename) {
 // 响应画质下拉框切换
 function onQualitySelectChange(index) {
     if (!window.currentMediaData || !window.currentMediaData.video || !window.currentMediaData.video.qualities) return;
-    const q = window.currentMediaData.video.qualities[index];
+    const data = window.currentMediaData;
+    const q = data.video.qualities[index];
     if (!q) return;
     
-    const cleanTitle = window.currentMediaData.title ? window.currentMediaData.title.replace(/[\r\n]+/g, " ").slice(0, 60) : `bilibili_${window.currentMediaData.id}`;
+    const isBilibili = data.platform === 'bilibili';
+    const isTwitter = data.platform === 'twitter';
+    const cleanTitle = data.title ? data.title.replace(/[\r\n]+/g, " ").slice(0, 60) : `${data.platform || 'media'}_${data.id}`;
     
     // 更新主下载按钮
     const mainBtn = document.getElementById("mainDownloadBtn");
     if (mainBtn) {
         const qName = q.label.split("(")[0].trim();
-        mainBtn.innerHTML = `<i class="fa-solid fa-download"></i> 下载视频 (${qName} 带声音 MP4)`;
+        mainBtn.innerHTML = `<i class="fa-solid fa-download"></i> 下载视频 (${qName}${isBilibili ? ' 带声音' : ''} MP4)`;
         mainBtn.onclick = function() {
-            triggerMuxDownload(q.video_url, q.audio_url, `${cleanTitle}_${qName}.mp4`);
+            if (isBilibili && q.audio_url) {
+                triggerMuxDownload(q.video_url, q.audio_url, `${cleanTitle}_${qName}.mp4`);
+            } else {
+                triggerDownload(q.video_url, `${cleanTitle}_${qName}.mp4`);
+            }
         };
     }
 
     // 同步更新网页播放器
     const player = document.getElementById("mainVideoPlayer");
-    if (player && q.video_url && q.audio_url) {
-        player.src = `/api/stream/mux?video_url=${encodeURIComponent(q.video_url)}&audio_url=${encodeURIComponent(q.audio_url)}&inline=true`;
+    if (player && q.video_url) {
+        if (isBilibili && q.audio_url) {
+            player.src = `/api/stream/mux?video_url=${encodeURIComponent(q.video_url)}&audio_url=${encodeURIComponent(q.audio_url)}&inline=true`;
+        } else {
+            player.src = q.video_url;
+        }
     }
 }

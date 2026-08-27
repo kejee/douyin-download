@@ -185,32 +185,54 @@ class TwitterExtractor(BaseExtractor):
         # 若包含视频/GIF
         if video_data and video_data.get("variants"):
             variants = video_data.get("variants", [])
-            # 过滤 mp4 格式并按码率降序
             mp4_variants = [v for v in variants if v.get("type") == "video/mp4" or "mp4" in v.get("src", "")]
-            mp4_variants.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+
+            def get_variant_score(v: dict) -> int:
+                src = v.get("src", "")
+                bitrate = v.get("bitrate") or 0
+                match = re.search(r'/vid/(?:avc1/)?(\d+)x(\d+)/', src)
+                if match:
+                    w, h = int(match.group(1)), int(match.group(2))
+                    return max(w, h) * 10000000 + bitrate
+                return bitrate
+
+            # 严格按分辨率长边权重与码率从大到小排序
+            mp4_variants.sort(key=get_variant_score, reverse=True)
 
             if mp4_variants:
-                best_video = mp4_variants[0]
-                best_url = best_video.get("src", "")
                 poster_url = video_data.get("poster", "")
                 duration_sec = int(video_data.get("durationMillis", 0) / 1000)
 
-                # 构造多画质选项
+                # 构造多画质选项 (按分辨率去重，保留最高码率)
+                seen_res = set()
                 qualities: List[QualityOption] = []
                 for v in mp4_variants:
                     src = v.get("src", "")
-                    bitrate = v.get("bitrate", 0)
+                    bitrate = v.get("bitrate", 0) or 0
                     
                     # 从 URL 中提取分辨率标识，如 /vid/avc1/1280x720/xxx.mp4 或 /vid/720x1280/xxx.mp4
-                    res_match = re.search(r'/vid/(?:avc1/)?(\d+x\d+)/', src)
-                    res_tag = res_match.group(1) if res_match else ""
-                    
+                    res_match = re.search(r'/vid/(?:avc1/)?(\d+)x(\d+)/', src)
+                    if res_match:
+                        w, h = int(res_match.group(1)), int(res_match.group(2))
+                        res_tag = f"{w}x{h}"
+                        min_dim = min(w, h)
+                        max_dim = max(w, h)
+                    else:
+                        res_tag = ""
+                        min_dim = 0
+                        max_dim = 0
+
+                    res_key = f"{min_dim}p" if min_dim else src
+                    if res_key in seen_res:
+                        continue
+                    seen_res.add(res_key)
+
                     label = "原画高清"
-                    if bitrate > 2000000 or "1080" in res_tag:
+                    if max_dim >= 1920 or min_dim >= 1080 or bitrate > 2000000:
                         label = f"1080P 高清 {f'({res_tag})' if res_tag else ''}"
-                    elif bitrate > 800000 or "720" in res_tag:
+                    elif max_dim >= 1280 or min_dim >= 720 or bitrate > 800000:
                         label = f"720P 高清 {f'({res_tag})' if res_tag else ''}"
-                    elif bitrate > 300000 or "480" in res_tag:
+                    elif max_dim >= 850 or min_dim >= 480 or bitrate > 300000:
                         label = f"480P 清晰 {f'({res_tag})' if res_tag else ''}"
                     elif res_tag:
                         label = f"标清 ({res_tag})"
@@ -224,14 +246,19 @@ class TwitterExtractor(BaseExtractor):
                         label += f" ~ {size_str}"
 
                     qualities.append(QualityOption(
-                        id=str(bitrate),
+                        id=str(bitrate or len(qualities)),
                         label=label.strip(),
                         video_url=src,
                         audio_url="",
                         filesize_bytes=size_bytes,
                         filesize_str=size_str,
+                        width=w if res_match else 0,
+                        height=h if res_match else 0,
                         codec="H.264",
                     ))
+
+                best_url = qualities[0].video_url if qualities else mp4_variants[0].get("src", "")
+                best_label = qualities[0].label.split("(")[0].strip() if qualities else "高清"
 
                 return MediaResponse(
                     success=True,
@@ -246,7 +273,7 @@ class TwitterExtractor(BaseExtractor):
                         watermark_url="",
                         no_watermark_url=best_url,
                         audio_url="",
-                        ratio="1080P 高清" if len(qualities) > 0 and "1080" in qualities[0].label else "高清",
+                        ratio=best_label,
                         duration=duration_sec,
                         qualities=qualities,
                     ),
@@ -343,8 +370,17 @@ class TwitterExtractor(BaseExtractor):
 
         formats = data.get("formats", [])
         mp4_formats = [f for f in formats if f.get("ext") == "mp4" and f.get("url")]
-        mp4_formats.sort(key=lambda x: x.get("height", 0) or x.get("tbr", 0) or 0, reverse=True)
 
+        def get_format_score(f: dict) -> int:
+            h = f.get("height") or 0
+            w = f.get("width") or 0
+            tbr = f.get("tbr") or 0
+            filesize = f.get("filesize") or f.get("filesize_approx") or 0
+            return max(w, h) * 100000000 + h * 1000000 + int(tbr * 1000) + int(filesize / 1024)
+
+        mp4_formats.sort(key=get_format_score, reverse=True)
+
+        seen_heights = set()
         qualities: List[QualityOption] = []
         for f in mp4_formats:
             v_url = f.get("url", "")
@@ -353,6 +389,11 @@ class TwitterExtractor(BaseExtractor):
             filesize = f.get("filesize") or f.get("filesize_approx") or 0
             size_str = format_bytes(filesize)
             
+            res_key = f"{height}p" if height else v_url
+            if res_key in seen_heights:
+                continue
+            seen_heights.add(res_key)
+
             label = f"{height}P 高清" if height else "MP4 标清"
             if width and height:
                 label += f" ({width}x{height})"
@@ -371,7 +412,8 @@ class TwitterExtractor(BaseExtractor):
                 codec="H.264",
             ))
 
-        best_video_url = mp4_formats[0].get("url") if mp4_formats else data.get("url", "")
+        best_video_url = qualities[0].video_url if qualities else (mp4_formats[0].get("url") if mp4_formats else data.get("url", ""))
+        best_ratio = qualities[0].label.split("(")[0].strip() if qualities else "高清"
         cover = data.get("thumbnail", "")
         duration = int(data.get("duration", 0))
 
@@ -388,7 +430,7 @@ class TwitterExtractor(BaseExtractor):
                 watermark_url="",
                 no_watermark_url=best_video_url,
                 audio_url="",
-                ratio=f"{qualities[0].height}P 高清" if qualities and qualities[0].height else "高清",
+                ratio=best_ratio,
                 duration=duration,
                 qualities=qualities,
             ),

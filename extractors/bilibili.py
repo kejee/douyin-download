@@ -49,15 +49,40 @@ def format_bytes(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.0f} KB"
     return f"{size_bytes} B"
 
+def get_bilibili_cookie() -> str:
+    """获取 B 站 Cookie (支持环境变量 BILIBILI_COOKIE / SESSDATA 或本地 cookies.txt 文件)"""
+    import os
+    cookie = os.getenv("BILIBILI_COOKIE", "").strip()
+    if not cookie:
+        sess = os.getenv("SESSDATA", "").strip()
+        if sess:
+            cookie = f"SESSDATA={sess}"
+    
+    if not cookie:
+        for cfile in ["bilibili_cookie.txt", "cookies.txt", "/app/bilibili_cookie.txt", "/app/cookies.txt"]:
+            if os.path.isfile(cfile):
+                try:
+                    with open(cfile, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                        if content:
+                            cookie = content
+                            break
+                except Exception:
+                    pass
+    return cookie
+
 class BilibiliExtractor(BaseExtractor):
     def __init__(self, timeout: float = 15.0):
         super().__init__(timeout)
+        self.cookie = get_bilibili_cookie()
         self.headers = {
             "User-Agent": BILIBILI_DESKTOP_UA,
             "Referer": "https://www.bilibili.com/",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
+        if self.cookie:
+            self.headers["Cookie"] = self.cookie
 
     def match(self, url: str) -> bool:
         return any(domain in url for domain in [
@@ -98,27 +123,33 @@ class BilibiliExtractor(BaseExtractor):
         return None
 
     def _extract_via_ytdlp(self, target_url: str) -> Optional[Dict[str, Any]]:
-        """利用 yt-dlp 深度提取免登录 1080P/720P DASH 流与元数据"""
+        """利用 yt-dlp 深度提取免登录/登录 1080P/720P DASH 流与元数据"""
         if not yt_dlp:
             return None
         try:
             import os
             proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+            http_headers = {
+                "User-Agent": BILIBILI_DESKTOP_UA,
+                "Referer": "https://www.bilibili.com/",
+            }
+            cookie = get_bilibili_cookie()
+            if cookie:
+                http_headers["Cookie"] = cookie
+
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
-                "http_headers": {
-                    "User-Agent": BILIBILI_DESKTOP_UA,
-                    "Referer": "https://www.bilibili.com/",
-                },
+                "http_headers": http_headers,
             }
             if proxy:
                 ydl_opts["proxy"] = proxy
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(target_url, download=False)
                 return info
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[Bilibili] yt-dlp 提取异常 (将回退至官方接口通道): {e}")
             return None
 
     async def extract(self, url: str) -> MediaResponse:

@@ -123,6 +123,19 @@ function formatNumber(num) {
     return num.toLocaleString();
 }
 
+// 格式化时长 (秒 -> mm:ss 或 hh:mm:ss)
+function formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return "";
+    const sec = Math.round(seconds);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) {
+        return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
+
 // 复制到剪贴板
 async function copyToClipboard(text, label = "链接") {
     try {
@@ -197,6 +210,7 @@ parseBtn.addEventListener("click", async () => {
 // 渲染结果
 function renderResult(data) {
     const { platform, platform_name, type, title, author, statistics, music, cover, video, images, id } = data;
+    window.currentMediaData = data;
     const cleanTitle = title ? title.replace(/[\r\n]+/g, " ").slice(0, 60) : `${platform || 'media'}_${id}`;
 
     let mediaHtml = "";
@@ -206,11 +220,36 @@ function renderResult(data) {
         const noWmUrl = video.no_watermark_url;
         const wmUrl = video.watermark_url;
 
-        // 视频播放器 (直接免代理加载，配合 no-referrer 策略)
+        const isPipixia = platform === 'pipixia';
+        const isBilibili = platform === 'bilibili';
+        const isSingleStream = platform === 'pipixia' || platform === 'kuaishou' || platform === 'xhs' || isBilibili;
+
+        const audioUrl = video.audio_url || (music && music.url ? music.url : "");
+
+        // 视频播放源：B站等音视频分离流走后端实时混流流式代理 (带声音且 100% 兼容 iOS/Safari)
+        const isBiliStream = isBilibili && audioUrl;
+        const previewSrc = isBiliStream
+            ? `/api/stream/mux?video_url=${encodeURIComponent(noWmUrl)}&audio_url=${encodeURIComponent(audioUrl)}&inline=true`
+            : noWmUrl;
+
+        const durStr = video.duration ? formatDuration(video.duration) : "";
+
+        // 视频播放器
         mediaHtml = `
             <div class="media-preview-container">
+                <div class="stream-badge-group">
+                    ${isBiliStream ? `
+                    <div class="stream-live-badge">
+                        <i class="fa-solid fa-bolt text-gradient"></i> 实时双轨混流
+                    </div>` : ''}
+                    ${durStr ? `
+                    <div class="stream-duration-badge">
+                        <i class="fa-regular fa-clock"></i> 总长 ${durStr}
+                    </div>` : ''}
+                </div>
                 <video 
-                    src="${noWmUrl}" 
+                    id="mainVideoPlayer"
+                    src="${previewSrc}" 
                     poster="${cover}" 
                     controls 
                     playsinline
@@ -220,24 +259,48 @@ function renderResult(data) {
             </div>
         `;
 
-        const isPipixia = platform === 'pipixia';
-        const isSingleStream = platform === 'pipixia' || platform === 'kuaishou' || platform === 'xhs';
+        const primaryBtnClick = isBilibili && audioUrl
+            ? `triggerMuxDownload('${noWmUrl}', '${audioUrl}', '${cleanTitle}_完整高清.mp4')`
+            : `triggerDownload('${noWmUrl}', '${cleanTitle}_${isPipixia ? '高清' : (isBilibili ? '高清' : '无水印')}.mp4')`;
+
+        const primaryBtnTitle = isBilibili 
+            ? `下载高清视频 (${video.ratio || '1080P'} 带声音 MP4)` 
+            : (isPipixia ? '下载高清视频 (原画 MP4)' : '下载无水印视频 (高清 MP4)');
+
+        // B站多画质下拉选择器
+        let qualitySelectorHtml = "";
+        if (isBilibili && video.qualities && video.qualities.length > 1) {
+            const optionsHtml = video.qualities.map((q, idx) => `
+                <option value="${idx}" ${idx === 0 ? 'selected' : ''}>
+                    ${q.label}
+                </option>
+            `).join("");
+            qualitySelectorHtml = `
+                <div class="quality-selector-box">
+                    <span class="quality-selector-label"><i class="fa-solid fa-sliders"></i> 画质选择:</span>
+                    <select class="quality-select" id="qualitySelect" onchange="onQualitySelectChange(this.value)">
+                        ${optionsHtml}
+                    </select>
+                </div>
+            `;
+        }
 
         actionsHtml = `
+            ${qualitySelectorHtml}
             <div class="download-action-grid">
-                <button class="btn-primary grid-span-2" onclick="triggerDownload('${noWmUrl}', '${cleanTitle}_${isPipixia ? '高清' : '无水印'}.mp4')">
-                    <i class="fa-solid fa-download"></i> ${isPipixia ? '下载高清视频 (原画 MP4)' : '下载无水印视频 (高清 MP4)'}
+                <button id="mainDownloadBtn" class="btn-primary grid-span-2" onclick="${primaryBtnClick}">
+                    <i class="fa-solid fa-download"></i> ${primaryBtnTitle}
                 </button>
                 ${!isSingleStream && wmUrl ? `
                 <button class="btn-secondary" onclick="triggerDownload('${wmUrl}', '${cleanTitle}_带水印.mp4')">
                     <i class="fa-solid fa-water"></i> 下载带水印视频
                 </button>` : ''}
-                ${music && music.url ? `
-                <button class="btn-secondary ${isSingleStream ? 'grid-span-2' : ''} btn-outline-cyan" onclick="triggerDownload('${music.url}', '${cleanTitle}_原声.mp3')">
-                    <i class="fa-solid fa-music"></i> 提取背景音乐 MP3
+                ${audioUrl ? `
+                <button class="btn-secondary ${isSingleStream ? 'grid-span-2' : ''} btn-outline-cyan" onclick="triggerDownload('${audioUrl}', '${cleanTitle}_原声.${isBilibili ? 'm4a' : 'mp3'}')">
+                    <i class="fa-solid fa-music"></i> 提取视频音频 (${isBilibili ? '原声 M4A/MP3' : '原声 MP3'})
                 </button>` : ''}
-                <button class="btn-secondary ${isSingleStream && (!cover) ? 'grid-span-2' : ''}" onclick="copyToClipboard('${noWmUrl}', '${isPipixia ? '视频直链' : '无水印直链'}')">
-                    <i class="fa-regular fa-copy"></i> 复制${isPipixia ? '视频直链' : '无水印直链'}
+                <button class="btn-secondary ${isSingleStream && (!cover) ? 'grid-span-2' : ''}" onclick="copyToClipboard('${noWmUrl}', '${isPipixia || isBilibili ? '视频直链' : '无水印直链'}')">
+                    <i class="fa-regular fa-copy"></i> 复制${isPipixia || isBilibili ? '视频直链' : '无水印直链'}
                 </button>
                 ${!isSingleStream && wmUrl ? `
                 <button class="btn-secondary" onclick="copyToClipboard('${wmUrl}', '带水印直链')">
@@ -335,13 +398,17 @@ function renderResult(data) {
                         if (statistics.play_count && statistics.play_count > 0) {
                             statsList.push({ label: "播放量", val: formatNumber(statistics.play_count) });
                         }
-                        // 4. 分享数 (若大于0则展示)
+                        // 4. 弹幕数 (B站)
+                        if (statistics.danmaku_count && statistics.danmaku_count > 0) {
+                            statsList.push({ label: "弹幕", val: formatNumber(statistics.danmaku_count) });
+                        }
+                        // 5. 分享数 (若大于0则展示)
                         if (statistics.share_count && statistics.share_count > 0) {
                             statsList.push({ label: "分享", val: formatNumber(statistics.share_count) });
                         }
-                        // 5. 类型
-                        const typeVal = type === 'images' ? `图集(${images ? images.length : 0}张)` : '视频';
-                        statsList.push({ label: "类型", val: typeVal });
+                        // 6. 类型
+                        const typeVal = type === 'images' ? `图集(${images ? images.length : 0}张)` : (video && video.ratio ? video.ratio : '视频');
+                        statsList.push({ label: "规格", val: typeVal });
 
                         return statsList.map(item => `
                             <div class="stat-item">
@@ -370,4 +437,49 @@ function downloadAllImages(imgList, baseTitle) {
             triggerDownload(url, `${baseTitle}_图${i + 1}.jpg`);
         }, i * 400);
     });
+}
+
+// 内存混流下载 (针对 B站 等 DASH 音视频分离格式)
+function triggerMuxDownload(videoUrl, audioUrl, filename) {
+    if (!videoUrl) {
+        showToast("视频链接无效", "error");
+        return;
+    }
+    const safeFilename = filename || "bilibili_video.mp4";
+    const muxUrl = `/api/stream/mux?video_url=${encodeURIComponent(videoUrl)}&audio_url=${encodeURIComponent(audioUrl || '')}&filename=${encodeURIComponent(safeFilename)}`;
+    
+    showToast("正在启动内存流式混流引擎，即将开始下载...", "info");
+    
+    const a = document.createElement("a");
+    a.href = muxUrl;
+    a.download = safeFilename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+// 响应画质下拉框切换
+function onQualitySelectChange(index) {
+    if (!window.currentMediaData || !window.currentMediaData.video || !window.currentMediaData.video.qualities) return;
+    const q = window.currentMediaData.video.qualities[index];
+    if (!q) return;
+    
+    const cleanTitle = window.currentMediaData.title ? window.currentMediaData.title.replace(/[\r\n]+/g, " ").slice(0, 60) : `bilibili_${window.currentMediaData.id}`;
+    
+    // 更新主下载按钮
+    const mainBtn = document.getElementById("mainDownloadBtn");
+    if (mainBtn) {
+        const qName = q.label.split("(")[0].trim();
+        mainBtn.innerHTML = `<i class="fa-solid fa-download"></i> 下载视频 (${qName} 带声音 MP4)`;
+        mainBtn.onclick = function() {
+            triggerMuxDownload(q.video_url, q.audio_url, `${cleanTitle}_${qName}.mp4`);
+        };
+    }
+
+    // 同步更新网页播放器
+    const player = document.getElementById("mainVideoPlayer");
+    if (player && q.video_url && q.audio_url) {
+        player.src = `/api/stream/mux?video_url=${encodeURIComponent(q.video_url)}&audio_url=${encodeURIComponent(q.audio_url)}&inline=true`;
+    }
 }

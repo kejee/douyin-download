@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 import urllib.parse
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,11 +11,11 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.0.0.0"
+APP_VERSION = "2.0.0.8"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
-    description="轻量高效的抖音、TikTok、小红书、快手、皮皮虾等无水印高清视频与图集解析工具",
+    description="轻量高效的抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili) 等无水印/高清视频与图集解析工具",
     version=APP_VERSION,
 )
 
@@ -51,7 +52,7 @@ async def health_check():
 
 @app.post("/api/parse")
 async def parse_media(req: ParseRequest):
-    """解析抖音、小红书、快手、皮皮虾等多平台分享链接或文案"""
+    """解析抖音、小红书、快手、皮皮虾、B站等多平台分享链接或文案"""
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="请输入有效的分享链接或文案")
     
@@ -61,7 +62,7 @@ async def parse_media(req: ParseRequest):
     
     return result
 
-@app.get("/api/download")
+@app.api_route("/api/download", methods=["GET", "HEAD"])
 async def proxy_download(
     url: str = Query(..., description="目标媒体直链"),
     filename: str = Query("media", description="保存的文件名"),
@@ -83,6 +84,8 @@ async def proxy_download(
         referer = "https://www.kuaishou.com/"
     elif "pipix.com" in url or "snssdk.com" in url:
         referer = "https://h5.pipix.com/"
+    elif "bilibili.com" in url or "bilivideo.cn" in url or "bilivideo.com" in url or "hdslb.com" in url:
+        referer = "https://www.bilibili.com/"
 
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
@@ -110,6 +113,8 @@ async def proxy_download(
         media_type = "image/webp"
     elif safe_filename.endswith(".mp3"):
         media_type = "audio/mpeg"
+    elif safe_filename.endswith(".m4a"):
+        media_type = "audio/mp4"
 
     encoded_filename = urllib.parse.quote(safe_filename)
     content_disposition = f"attachment; filename*=UTF-8''{encoded_filename}"
@@ -120,6 +125,97 @@ async def proxy_download(
         headers={
             "Content-Disposition": content_disposition,
             "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+@app.api_route("/api/stream/mux", methods=["GET", "HEAD"])
+async def stream_mux_download(
+    video_url: str = Query(..., description="视频轨直链"),
+    audio_url: str = Query("", description="音频轨直链"),
+    filename: str = Query("bilibili_video.mp4", description="合成后的文件名"),
+    inline: bool = Query(False, description="是否用于网页内嵌预览播放"),
+):
+    """B站等多音视频轨 DASH 实时内存管道混流下载与在线预览 (基于 FFmpeg 零磁盘流式封装)"""
+    if not video_url:
+        raise HTTPException(status_code=400, detail="缺少 video_url 参数")
+
+    # 若无音频轨，直接走普通代理下载
+    if not audio_url:
+        return await proxy_download(url=video_url, filename=filename)
+
+    safe_filename = re.sub(r'[\\/:*?"<>|\r\n]', '_', filename).strip() or "video.mp4"
+    if not safe_filename.endswith(".mp4"):
+        safe_filename += ".mp4"
+
+    referer = "https://www.bilibili.com/"
+    bili_ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+
+    # 构造 ffmpeg 管道命令: 开启 HTTP 智能重连，显式合并视频与音频轨并转为标准 aac 格式
+    header_str = f"Referer: {referer}\r\nUser-Agent: {bili_ua}\r\n"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loglevel", "error",
+        "-reconnect", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-headers", header_str,
+        "-i", video_url,
+        "-reconnect", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-headers", header_str,
+        "-i", audio_url,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "pipe:1"
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+    except Exception as e:
+        # 如果系统中未安装 ffmpeg，兜底回退为仅下载视频轨
+        return await proxy_download(url=video_url, filename=filename)
+
+    async def ffmpeg_stream_generator():
+        try:
+            while True:
+                chunk = await process.stdout.read(1024 * 128)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+
+    encoded_filename = urllib.parse.quote(safe_filename)
+    disposition_type = "inline" if inline else "attachment"
+    content_disposition = f"{disposition_type}; filename*=UTF-8''{encoded_filename}"
+
+    return StreamingResponse(
+        ffmpeg_stream_generator(),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": content_disposition,
+            "Access-Control-Allow-Origin": "*",
+            "Accept-Ranges": "bytes",
         },
     )
 

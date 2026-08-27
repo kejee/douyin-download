@@ -5,15 +5,17 @@ from extractors.douyin import DouyinExtractor
 from extractors.xiaohongshu import XiaohongshuExtractor
 from extractors.kuaishou import KuaishouExtractor
 from extractors.pipixia import PipixiaExtractor
+from extractors.bilibili import BilibiliExtractor
 
 class UnifiedMediaRouter:
     def __init__(self):
-        # 注册所有第一梯队解析器
+        # 注册所有支持的主流平台解析器
         self.extractors: List[BaseExtractor] = [
             DouyinExtractor(),
             XiaohongshuExtractor(),
             KuaishouExtractor(),
             PipixiaExtractor(),
+            BilibiliExtractor(),
         ]
 
     @staticmethod
@@ -50,5 +52,5 @@ class UnifiedMediaRouter:
             type="video",
             id="",
             title="",
-            error="当前暂不支持该平台链接，已支持：抖音、TikTok、小红书、快手、皮皮虾",
+            error="当前暂不支持该平台链接，已支持：抖音、TikTok、小红书、快手、皮皮虾、B站 (Bilibili)",
         )

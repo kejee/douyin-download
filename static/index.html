@@ -4,8 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>万能短视频 & 图集在线解析下载 | 抖音·小红书·快手·皮皮虾·TikTok</title>
-    <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、TikTok等无水印/带水印视频下载、原声音频提取及高清图集批量下载。">
+    <title>万能短视频 & B站视频在线解析下载 | 抖音·小红书·快手·皮皮虾·B站·TikTok</title>
+    <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,7 +15,7 @@
         rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=1.0.0.1002">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.0.0.8">
 </head>
 
 <body>
@@ -68,10 +68,10 @@
             <!-- 标题区 -->
             <section class="hero-section">
                 <h1 class="hero-title">
-                    全网短视频 & 图集 <span class="text-gradient">无水印高清解析</span>
+                    全网短视频 & B站 <span class="text-gradient">无水印高清解析</span>
                 </h1>
                 <p class="hero-subtitle">
-                    支持抖音、小红书、快手、皮皮虾、TikTok等无水印/带水印视频提取、原声分离与图集打包
+                    支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等高清视频下载、原声分离与图集打包
                 </p>
             </section>
 
@@ -92,35 +92,35 @@
                         </div>
                     </div>
                     <textarea id="urlInput" class="url-input"
-                        placeholder="粘贴抖音/小红书/快手/皮皮虾等分享文本或链接（支持直接粘贴 App 复制的任意文案）"
+                        placeholder="粘贴抖音/小红书/快手/皮皮虾/B站(BV号或b23.tv)等分享文本或链接..."
                         rows="3"></textarea>
                 </div>
 
-                <div class="parse-action-row">
-                    <button id="parseBtn" class="btn-primary">
-                        <span class="btn-text"><i class="fa-solid fa-bolt-lightning"></i> 立即解析</span>
-                        <span class="btn-loader" style="display: none;"><i class="fa-solid fa-spinner fa-spin"></i>
-                            正在解析中...</span>
+                <div class="action-row">
+                    <button id="parseBtn" class="btn-primary btn-block">
+                        <span class="btn-text">
+                            <i class="fa-solid fa-bolt"></i> 立即开始极速解析
+                        </span>
+                        <span class="btn-loader" style="display: none;">
+                            <i class="fa-solid fa-circle-notch fa-spin"></i> 正在解析中...
+                        </span>
                     </button>
                 </div>
             </section>
 
             <!-- 骨架屏 Loading -->
-            <div id="skeletonLoading" class="card result-card skeleton-container" style="display: none;">
-                <div class="skeleton-player shimmer"></div>
+            <div class="skeleton-loading" id="skeletonLoading" style="display: none;">
+                <div class="skeleton-media skeleton-shimmer"></div>
                 <div class="skeleton-info">
-                    <div class="skeleton-line shimmer w-75"></div>
-                    <div class="skeleton-line shimmer w-50"></div>
-                    <div class="skeleton-btn-grid">
-                        <div class="skeleton-btn shimmer"></div>
-                        <div class="skeleton-btn shimmer"></div>
-                    </div>
+                    <div class="skeleton-line skeleton-title skeleton-shimmer"></div>
+                    <div class="skeleton-line skeleton-desc skeleton-shimmer"></div>
+                    <div class="skeleton-line skeleton-btn skeleton-shimmer"></div>
                 </div>
             </div>
 
             <!-- 解析结果展示区 -->
-            <section id="resultContainer" class="card result-card" style="display: none;">
-                <!-- 动态注入解析结果 -->
+            <section class="card result-card" id="resultContainer" style="display: none;">
+                <!-- 动态由 app.js 渲染 -->
             </section>
 
             <!-- 广告与赞助商推荐区 (在免责声明上方) -->
@@ -151,10 +151,10 @@
             </div>
             <div class="footer-meta">
                 <div class="footer-copy">
-                    <span>© 2026 Douyin Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
+                    <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.0.0.0</span>
+                    <span class="badge badge-version">v2.0.0.8</span>
                 </div>
             </div>
         </footer>
@@ -191,7 +191,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=1.0.0.1002"></script>
+    <script src="/static/js/app.js?v=2.0.0.8"></script>
 </body>
 
 </html>

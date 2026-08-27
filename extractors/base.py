@@ -13,6 +13,8 @@ class StatisticsInfo(BaseModel):
     comment_count: int = 0
     share_count: int = 0
     play_count: int = 0
+    danmaku_count: int = 0
+    coin_count: int = 0
 
 class MusicInfo(BaseModel):
     title: str = ""
@@ -20,13 +22,26 @@ class MusicInfo(BaseModel):
     url: str = ""
     cover: str = ""
 
+class QualityOption(BaseModel):
+    id: str = Field(description="清晰度ID，如 1080p, 720p, 480p, 360p")
+    label: str = Field(description="展示标签，如 1080P 高清 (1080x1920)")
+    video_url: str = Field(description="该档画质视频轨直链")
+    audio_url: str = Field(default="", description="对应音频轨直链")
+    filesize_bytes: int = Field(default=0, description="预估文件字节大小")
+    filesize_str: str = Field(default="", description="预估文件可读大小，如 6.5 MB")
+    width: int = 0
+    height: int = 0
+    codec: str = "H.264"
+
 class VideoInfo(BaseModel):
     no_watermark_url: str = ""
     watermark_url: str = ""
+    audio_url: str = ""  # DASH 音频轨直链 (B站等)
     ratio: str = "720p"
     width: int = 0
     height: int = 0
     duration: int = 0
+    qualities: List[QualityOption] = Field(default_factory=list, description="多清晰度画质列表")
 
 class MediaResponse(BaseModel):
     success: bool = True

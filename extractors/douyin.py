@@ -22,6 +22,10 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 )
 
+SPIDER_USER_AGENT = (
+    "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)"
+)
+
 class DouyinExtractor(BaseExtractor):
     def __init__(self, timeout: float = 15.0):
         super().__init__(timeout)
@@ -34,6 +38,10 @@ class DouyinExtractor(BaseExtractor):
             "User-Agent": APP_USER_AGENT,
             "Accept": "*/*",
         }
+        self.spider_headers = {
+            "User-Agent": SPIDER_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
 
     def match(self, url: str) -> bool:
         return any(domain in url for domain in [
@@ -43,53 +51,116 @@ class DouyinExtractor(BaseExtractor):
         ])
 
     async def get_aweme_id(self, url: str) -> Optional[str]:
-        """根据输入的抖音链接，追踪重定向获取真实的 aweme_id"""
-        # 1. 尝试直接从当前 URL 匹配
+        """提取或跟随重定向获取真实 aweme_id"""
+        # 检查是否直接包含 ID
         id_match = re.search(r"/(?:video|note)/(\d+)", url)
         if id_match:
             return id_match.group(1)
 
-        # 2. 发起重定向追踪
-        async with httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=self.timeout) as client:
-            try:
+        # 跟随短链接重定向
+        try:
+            async with httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=self.timeout) as client:
                 resp = await client.get(url)
                 final_url = str(resp.url)
-                
-                # 从最终 URL 路径匹配
                 id_match = re.search(r"/(?:video|note)/(\d+)", final_url)
                 if id_match:
                     return id_match.group(1)
                 
-                # 从查询参数匹配
-                id_match = re.search(r"(?:modal_id|item_ids|aweme_id)=(\d+)", final_url)
-                if id_match:
-                    return id_match.group(1)
-            except Exception:
-                pass
+                # 从 HTML 页面中提取
+                modal_match = re.search(r"modal_id=(\d+)", final_url) or re.search(r"/(?:video|note)/(\d+)", resp.text)
+                if modal_match:
+                    return modal_match.group(1)
+        except Exception:
+            pass
+
         return None
 
     async def _fetch_from_feed_api(self, client: httpx.AsyncClient, aweme_id: str) -> Optional[Dict[str, Any]]:
-        """方案一（最稳定）：通过客户端原生 Feed 接口获取完整作品信息"""
+        """方案一：调用原生 Feed 流接口（必须精准匹配目标 ID）"""
         feed_endpoints = [
             f"https://api5-normal-c-lq.amemv.com/aweme/v1/feed/?aweme_id={aweme_id}",
             f"https://api.amemv.com/aweme/v1/feed/?aweme_id={aweme_id}",
-            f"https://api3-normal-c-hl.amemv.com/aweme/v1/feed/?aweme_id={aweme_id}",
+            f"https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={aweme_id}",
         ]
-        
         for ep in feed_endpoints:
             try:
                 resp = await client.get(ep, headers=self.app_headers, timeout=self.timeout)
                 if resp.status_code == 200 and resp.text:
                     data = resp.json()
                     aweme_list = data.get("aweme_list", [])
-                    if aweme_list and len(aweme_list) > 0:
-                        return aweme_list[0]
+                    for item in aweme_list:
+                        if str(item.get("aweme_id")) == str(aweme_id):
+                            return item
+            except Exception:
+                continue
+        return None
+
+    async def _fetch_note_from_schema(self, client: httpx.AsyncClient, aweme_id: str) -> Optional[MediaResponse]:
+        """方案二：通过 Schema 通道专有解析抖音图文笔记 (note)"""
+        note_urls = [
+            f"https://www.iesdouyin.com/share/note/{aweme_id}/",
+            f"https://www.douyin.com/note/{aweme_id}",
+        ]
+        for nu in note_urls:
+            try:
+                resp = await client.get(nu, headers=self.spider_headers, follow_redirects=True, timeout=self.timeout)
+                if resp.status_code != 200 or not resp.text:
+                    continue
+
+                for s in re.findall(r"<script[^>]*type=[\"\x27]application/ld\+json[\"\x27][^>]*>(.*?)</script>", resp.text, re.DOTALL):
+                    try:
+                        data = json.loads(s.strip())
+                        if data.get("@type") == "article" or "image" in data:
+                            title = data.get("headline") or data.get("name") or f"抖音图文_{aweme_id}"
+                            images = data.get("image", [])
+                            if not images or not isinstance(images, list):
+                                continue
+
+                            # 作者信息
+                            author_raw = data.get("author", {})
+                            author_name = author_raw.get("name", "抖音创作者") if isinstance(author_raw, dict) else "抖音创作者"
+                            author_avatar = author_raw.get("image", "") if isinstance(author_raw, dict) else ""
+                            author_id = ""
+                            if isinstance(author_raw, dict) and author_raw.get("url"):
+                                m_uid = re.search(r"/user/([^/?]+)", author_raw["url"])
+                                if m_uid:
+                                    author_id = m_uid.group(1)
+
+                            # 点赞互动数据
+                            digg_count = 0
+                            if isinstance(author_raw, dict):
+                                for stat in author_raw.get("interactionStatistic", []):
+                                    if "LikeAction" in str(stat.get("interactionType", "")):
+                                        digg_count = int(stat.get("userInteractionCount", 0) or 0)
+
+                            return MediaResponse(
+                                success=True,
+                                platform="douyin",
+                                platform_name="抖音",
+                                type="images",
+                                id=aweme_id,
+                                title=title,
+                                cover=images[0] if images else "",
+                                author=AuthorInfo(
+                                    nickname=author_name,
+                                    avatar=author_avatar,
+                                    unique_id=author_id or "douyin_user",
+                                ),
+                                statistics=StatisticsInfo(
+                                    digg_count=digg_count,
+                                ),
+                                music=MusicInfo(),
+                                images=images,
+                                image_count=len(images),
+                            )
+                    except Exception:
+                        continue
             except Exception:
                 continue
         return None
 
     def _extract_item_from_html(self, html: str) -> Optional[Dict[str, Any]]:
-        """方案二：从 H5 分享页 SSR HTML 中提取数据"""
+        """方案三：从 H5 分享页 SSR HTML 中提取数据"""
         router_match = re.search(r"window\._ROUTER_DATA\s*=\s*(.*?);\s*</script>", html, re.DOTALL)
         if router_match:
             try:
@@ -105,18 +176,6 @@ class DouyinExtractor(BaseExtractor):
                             return val["item_list"][0]
             except Exception:
                 pass
-
-        ssr_match = re.search(r"window\._SSR_DATA\s*=\s*(.*?);\s*</script>", html, re.DOTALL)
-        if ssr_match:
-            try:
-                raw_json = ssr_match.group(1).strip().rstrip(";")
-                data = json.loads(raw_json)
-                item = data.get("itemInfo", {}).get("itemStruct")
-                if item:
-                    return item
-            except Exception:
-                pass
-
         return None
 
     async def _resolve_real_video_url(self, client: httpx.AsyncClient, video_url: str) -> str:
@@ -144,21 +203,31 @@ class DouyinExtractor(BaseExtractor):
                 type="video",
                 id="",
                 title="",
-                error="未能解析出抖音视频 ID，请确认链接是否有效",
+                error="未能解析出抖音作品 ID，请确认链接是否有效",
             )
 
         async with httpx.AsyncClient(headers=self.headers, timeout=self.timeout) as client:
-            # 1. 优先调用客户端原生 Feed 接口
+            # 1. 优先调用客户端原生 Feed 接口 (针对单视频)
             item = await self._fetch_from_feed_api(client, aweme_id)
 
-            # 2. 备用策略：从分享页 SSR 数据提取
+            # 2. 如果是图文笔记 (note) 或 Feed 未命中，通过 Schema 通道提取完整图集
             if not item:
-                try:
-                    share_url = f"https://www.iesdouyin.com/share/video/{aweme_id}/"
-                    resp = await client.get(share_url, follow_redirects=True)
-                    item = self._extract_item_from_html(resp.text)
-                except Exception:
-                    pass
+                note_response = await self._fetch_note_from_schema(client, aweme_id)
+                if note_response:
+                    return note_response
+
+            # 3. 备用策略：从分享页 SSR 数据提取
+            if not item:
+                for share_type in ["video", "note"]:
+                    try:
+                        share_url = f"https://www.iesdouyin.com/share/{share_type}/{aweme_id}/"
+                        resp = await client.get(share_url, follow_redirects=True)
+                        extracted = self._extract_item_from_html(resp.text)
+                        if extracted:
+                            item = extracted
+                            break
+                    except Exception:
+                        continue
 
             if not item:
                 return MediaResponse(
@@ -168,64 +237,52 @@ class DouyinExtractor(BaseExtractor):
                     type="video",
                     id=aweme_id,
                     title="",
-                    error="获取抖音视频数据失败，可能是接口风控或链接已失效",
+                    error="未能获取到该作品数据，可能已被作者删除或链接已失效",
                 )
 
-            # 整理元数据
-            title = item.get("desc", f"douyin_{aweme_id}").strip()
+            # 解析作品基本信息
+            title = item.get("desc", f"douyin_{aweme_id}")
             create_time = item.get("create_time", 0)
 
             # 作者信息
             author = item.get("author", {})
-            author_avatar = (
-                author.get("avatar_thumb", {}).get("url_list", [""])[0] 
-                or author.get("avatar_medium", {}).get("url_list", [""])[0]
-                or author.get("avatar_larger", {}).get("url_list", [""])[0]
-            )
             author_info = AuthorInfo(
-                nickname=author.get("nickname", "未知作者"),
-                avatar=author_avatar,
-                unique_id=author.get("unique_id") or author.get("short_id") or "未知ID",
+                nickname=author.get("nickname", "未知用户"),
+                avatar=author.get("avatar_thumb", {}).get("url_list", [""])[0] if author.get("avatar_thumb") else "",
+                unique_id=author.get("unique_id") or author.get("short_id") or "",
                 signature=author.get("signature", ""),
             )
 
-            # 互动数据
-            stats = item.get("statistics", {})
+            # 统计数据
+            statistics = item.get("statistics", {})
             statistics_info = StatisticsInfo(
-                digg_count=stats.get("digg_count", 0),
-                comment_count=stats.get("comment_count", 0),
-                share_count=stats.get("share_count", 0),
-                play_count=stats.get("play_count", 0),
+                digg_count=statistics.get("digg_count", 0),
+                comment_count=statistics.get("comment_count", 0),
+                share_count=statistics.get("share_count", 0),
+                play_count=statistics.get("play_count", 0),
             )
 
             # 背景音乐
             music = item.get("music", {})
-            music_play = music.get("play_url", {}) if music else {}
-            music_url = music_play.get("url_list", [""])[0] if music_play else ""
+            music_url = music.get("play_url", {}).get("url_list", [""])[0] if music.get("play_url") else ""
+            music_cover = music.get("cover_large", {}).get("url_list", [""])[0] if music.get("cover_large") else ""
             music_info = MusicInfo(
-                title=music.get("title", "") if music else "",
-                author=music.get("author", "") if music else "",
+                title=music.get("title", ""),
+                author=music.get("author", ""),
                 url=music_url,
-                cover=music.get("cover_large", {}).get("url_list", [""])[0] if music else "",
+                cover=music_cover,
             )
 
-            # 封面
-            video_info = item.get("video", {})
-            covers = (
-                video_info.get("origin_cover", {}).get("url_list", [])
-                or video_info.get("cover", {}).get("url_list", [])
-                or video_info.get("dynamic_cover", {}).get("url_list", [])
-            )
-            cover_url = covers[0] if covers else ""
+            # 判断是图集 (images) 还是 视频 (video)
+            images_data = item.get("images")
+            if images_data and isinstance(images_data, list) and len(images_data) > 0:
+                image_urls = []
+                for img in images_data:
+                    url_list = img.get("url_list", [])
+                    if url_list:
+                        image_urls.append(url_list[-1])
 
-            # 判断类型：图集 or 视频
-            images = item.get("images")
-            if images and isinstance(images, list) and len(images) > 0:
-                img_urls = []
-                for img in images:
-                    urls = img.get("url_list", [])
-                    if urls:
-                        img_urls.append(urls[0])
+                cover_url = image_urls[0] if image_urls else ""
 
                 return MediaResponse(
                     success=True,
@@ -234,52 +291,61 @@ class DouyinExtractor(BaseExtractor):
                     type="images",
                     id=aweme_id,
                     title=title,
-                    cover=cover_url or (img_urls[0] if img_urls else ""),
-                    author=author_info,
-                    statistics=statistics_info,
-                    music=music_info,
-                    images=img_urls,
-                    image_count=len(img_urls),
-                    create_time=create_time,
-                )
-            else:
-                # 视频资源
-                bit_rate = video_info.get("bit_rate", [])
-                play_url_list = []
-                if bit_rate and isinstance(bit_rate, list) and len(bit_rate) > 0:
-                    sorted_bitrate = sorted(bit_rate, key=lambda x: x.get("bit_rate", 0), reverse=True)
-                    play_url_list = sorted_bitrate[0].get("play_addr", {}).get("url_list", [])
-                
-                if not play_url_list:
-                    play_url_list = video_info.get("play_addr", {}).get("url_list", [])
-
-                raw_play_url = play_url_list[0] if play_url_list else ""
-                nowm_url = raw_play_url.replace("playwm", "play") if raw_play_url else ""
-                wm_url = (
-                    video_info.get("download_addr", {}).get("url_list", [""])[0]
-                    or raw_play_url
-                )
-
-                real_nowm_url = await self._resolve_real_video_url(client, nowm_url) if nowm_url else ""
-
-                return MediaResponse(
-                    success=True,
-                    platform="douyin",
-                    platform_name="抖音",
-                    type="video",
-                    id=aweme_id,
-                    title=title,
                     cover=cover_url,
                     author=author_info,
                     statistics=statistics_info,
                     music=music_info,
-                    video=VideoInfo(
-                        no_watermark_url=real_nowm_url or nowm_url,
-                        watermark_url=wm_url,
-                        ratio=video_info.get("ratio", "720p"),
-                        width=video_info.get("width", 0),
-                        height=video_info.get("height", 0),
-                        duration=video_info.get("duration", 0),
-                    ),
+                    images=image_urls,
+                    image_count=len(image_urls),
                     create_time=create_time,
                 )
+
+            # 处理视频
+            video_data = item.get("video", {})
+            wm_url = ""
+            no_wm_url = ""
+
+            play_addr = video_data.get("play_addr", {})
+            if play_addr and "url_list" in play_addr and len(play_addr["url_list"]) > 0:
+                raw_url = play_addr["url_list"][0]
+                no_wm_url = raw_url.replace("playwm", "play")
+
+            download_addr = video_data.get("download_addr", {})
+            if download_addr and "url_list" in download_addr and len(download_addr["url_list"]) > 0:
+                wm_url = download_addr["url_list"][0]
+            else:
+                wm_url = no_wm_url
+
+            cover_data = video_data.get("cover", {})
+            cover_url = cover_data.get("url_list", [""])[0] if cover_data.get("url_list") else ""
+
+            duration = video_data.get("duration", 0)
+            width = video_data.get("width", 0)
+            height = video_data.get("height", 0)
+            ratio = video_data.get("ratio", "720p")
+
+            # 解析真实重定向地址
+            real_no_wm_url = await self._resolve_real_video_url(client, no_wm_url)
+            real_wm_url = await self._resolve_real_video_url(client, wm_url) if wm_url != no_wm_url else real_no_wm_url
+
+            return MediaResponse(
+                success=True,
+                platform="douyin",
+                platform_name="抖音",
+                type="video",
+                id=aweme_id,
+                title=title,
+                cover=cover_url,
+                author=author_info,
+                statistics=statistics_info,
+                music=music_info,
+                video=VideoInfo(
+                    no_watermark_url=real_no_wm_url,
+                    watermark_url=real_wm_url,
+                    ratio=ratio,
+                    width=width,
+                    height=height,
+                    duration=duration,
+                ),
+                create_time=create_time,
+            )

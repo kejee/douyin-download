@@ -14,7 +14,7 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.1.0.1"
+APP_VERSION = "2.2.1.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -240,63 +240,6 @@ async def stream_mux_download(
             "Content-Disposition": content_disposition,
             "Access-Control-Allow-Origin": "*",
             "Accept-Ranges": "bytes",
-        },
-    )
-
-class BatchZipItem(BaseModel):
-    url: str
-    filename: str
-
-class BatchZipRequest(BaseModel):
-    zip_name: str = "batch_media"
-    items: List[BatchZipItem]
-
-@app.post("/api/batch/zip")
-async def batch_zip_download(req: BatchZipRequest):
-    """批量流式打包下载选中的视频/图片为 ZIP"""
-    if not req.items:
-        raise HTTPException(status_code=400, detail="未选中任何下载文件")
-
-    # 限制单次打包最多 50 个文件，防止内存过载
-    items = req.items[:50]
-    safe_zip_name = re.sub(r'[\\/:*?"<>|\r\n]', '_', req.zip_name).strip() or "batch_media"
-    if not safe_zip_name.endswith(".zip"):
-        safe_zip_name += ".zip"
-
-    proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
-
-    async def zip_stream_generator():
-        import io
-        import zipfile
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0, proxy=proxy) as client:
-                for idx, it in enumerate(items):
-                    try:
-                        headers = {"User-Agent": DEFAULT_USER_AGENT}
-                        if "douyin.com" in it.url or "iesdouyin.com" in it.url:
-                            headers["Referer"] = "https://www.douyin.com/"
-                        elif "xhscdn.com" in it.url:
-                            headers["Referer"] = "https://www.xiaohongshu.com/"
-                        elif "twimg.com" in it.url:
-                            headers["Referer"] = "https://twitter.com/"
-                        
-                        r = await client.get(it.url, headers=headers)
-                        if r.status_code == 200:
-                            f_name = re.sub(r'[\\/:*?"<>|\r\n]', '_', it.filename).strip() or f"media_{idx+1}.mp4"
-                            zf.writestr(f_name, r.content)
-                    except Exception:
-                        continue
-        zip_buffer.seek(0)
-        yield zip_buffer.getvalue()
-
-    encoded_zip_name = urllib.parse.quote(safe_zip_name)
-    return StreamingResponse(
-        zip_stream_generator(),
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_zip_name}",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 

@@ -16,6 +16,9 @@ from extractors.base import (
     MusicInfo,
     VideoInfo,
     QualityOption,
+    UserProfileInfo,
+    UserPostItem,
+    UserProfileResponse,
 )
 
 BILIBILI_DESKTOP_UA = (
@@ -413,3 +416,186 @@ class BilibiliExtractor(BaseExtractor):
                 ),
                 create_time=pubdate,
             )
+
+    async def get_mid(self, url: str) -> Optional[str]:
+        """从主页链接或短链中提取 UP主的 mid (UID)"""
+        # 1. 直接匹配 space.bilibili.com/数字 或 bilibili.com/space/数字 或 mid=数字
+        m = re.search(r"space\.bilibili\.com/(\d+)", url) or re.search(r"bilibili\.com/space/(\d+)", url) or re.search(r"[?&]mid=(\d+)", url)
+        if m:
+            return m.group(1)
+
+        # 2. 如果是短链 b23.tv / bili2233.cn，逐级追踪 302 Location
+        if "b23.tv" in url or "bili2233.cn" in url:
+            try:
+                m_short = re.search(r"https?://(?:b23\.tv|bili2233\.cn)/[a-zA-Z0-9]+", url)
+                target = m_short.group(0) if m_short else url
+                async with httpx.AsyncClient(headers=self.headers, follow_redirects=False, timeout=self.timeout) as client:
+                    resp = await client.get(target)
+                    loc = resp.headers.get("location", "")
+                    if loc:
+                        m_loc = re.search(r"space(?:/|\.bilibili\.com/)(\d+)", loc) or re.search(r"[?&]mid=(\d+)", loc)
+                        if m_loc:
+                            return m_loc.group(1)
+            except Exception:
+                pass
+
+        return None
+
+    def _extract_space_entries(self, space_url: str, start_idx: int, end_idx: int) -> List[str]:
+        """利用 yt-dlp 分页拉取 UP 主空间投稿的 BVID 列表"""
+        if not yt_dlp:
+            return []
+        try:
+            import os
+            proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": True,
+                "playliststart": start_idx,
+                "playlistend": end_idx,
+            }
+            if proxy:
+                ydl_opts["proxy"] = proxy
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(space_url, download=False)
+                entries = info.get("entries", []) if info else []
+                bvids = []
+                for e in entries:
+                    bid = e.get("id") or ""
+                    if bid.startswith("BV") or bid.startswith("bv"):
+                        bvids.append(bid)
+                    elif e.get("url"):
+                        m = re.search(r"(BV[a-zA-Z0-9]{10})", e.get("url"))
+                        if m:
+                            bvids.append(m.group(1))
+                return bvids
+        except Exception:
+            return []
+
+    async def extract_user_posts(self, url: str, cursor: int = 0, count: int = 20) -> UserProfileResponse:
+        """抓取 B站 UP 主主页空间作品列表 (带分页游标)"""
+        mid = await self.get_mid(url)
+        if not mid:
+            return UserProfileResponse(
+                success=False,
+                platform="bilibili",
+                platform_name="哔哩哔哩",
+                error="未能识别出有效的 B站 UP 主主页链接，请提供如 https://space.bilibili.com/946974 或分享短链",
+            )
+
+        # 将游标转换为页码 (cursor 0 -> page 1, cursor 20 -> page 2)
+        page_num = (cursor // count) + 1 if count > 0 else 1
+
+        mobile_headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            "Referer": f"https://m.bilibili.com/space/{mid}",
+        }
+
+        user_info = UserProfileInfo(
+            sec_uid=mid,
+            unique_id=mid,
+            nickname=f"UP主_{mid}",
+        )
+
+        posts: List[UserPostItem] = []
+        has_more = False
+        next_cursor = cursor
+
+        async with httpx.AsyncClient(headers=mobile_headers, follow_redirects=True, timeout=self.timeout) as client:
+            # 1. 尝试从移动端主页获取 UP 主头像和个性签名
+            try:
+                r_home = await client.get(f"https://m.bilibili.com/space/{mid}")
+                if r_home.status_code == 200:
+                    import json
+                    m_state = re.search(r'__INITIAL_STATE__\s*=\s*(\{.*?\});', r_home.text)
+                    if m_state:
+                        st_data = json.loads(m_state.group(1))
+                        u_info = st_data.get("space", {}).get("info", {})
+                        if u_info:
+                            user_info.nickname = u_info.get("name") or user_info.nickname
+                            user_info.avatar = u_info.get("face") or ""
+                            user_info.signature = u_info.get("sign") or ""
+            except Exception:
+                pass
+
+            # 2. 获取 UP 主粉丝数
+            try:
+                r_stat = await client.get(f"https://api.bilibili.com/x/relation/stat?vmid={mid}")
+                if r_stat.status_code == 200:
+                    d_stat = r_stat.json().get("data", {})
+                    user_info.follower_count = int(d_stat.get("follower", 0) or 0)
+            except Exception:
+                pass
+
+            # 3. 获取 UP 主投稿作品分页列表
+            try:
+                arc_url = f"https://api.bilibili.com/x/space/arc/search?mid={mid}&ps={count}&pn={page_num}"
+                r_arc = await client.get(arc_url)
+                if r_arc.status_code == 200:
+                    arc_data = r_arc.json().get("data", {})
+                    vlist = arc_data.get("list", {}).get("vlist", [])
+                    page_info = arc_data.get("page", {})
+                    total_count = page_info.get("count", 0)
+                    user_info.aweme_count = total_count
+                    total_plays = sum(int(v.get("play", 0) or 0) for v in vlist)
+                    user_info.total_favorited = total_plays
+
+                    for v in vlist:
+                        bvid = v.get("bvid", "")
+                        title = v.get("title", "")
+                        cover = v.get("pic", "")
+                        # 转换时长 "03:45" 或 "01:23:45"
+                        length_str = v.get("length", "0:0")
+                        dur_secs = 0
+                        try:
+                            parts = [int(p) for p in str(length_str).split(":")]
+                            if len(parts) == 2:
+                                dur_secs = parts[0] * 60 + parts[1]
+                            elif len(parts) == 3:
+                                dur_secs = parts[0] * 3600 + parts[1] * 60 + parts[2]
+                        except Exception:
+                            dur_secs = 0
+
+                        pubdate = int(v.get("created", 0) or 0)
+                        play_num = int(v.get("play", 0) or 0)
+                        comment_num = int(v.get("comment", 0) or 0)
+                        danmaku_num = int(v.get("video_review", 0) or 0)
+
+                        if not user_info.nickname or user_info.nickname.startswith("UP主_"):
+                            if v.get("author"):
+                                user_info.nickname = v.get("author")
+
+                        posts.append(UserPostItem(
+                            id=bvid,
+                            title=title,
+                            cover=cover,
+                            type="video",
+                            duration=dur_secs,
+                            create_time=pubdate,
+                            digg_count=play_num,
+                            comment_count=comment_num,
+                            download_url=f"https://www.bilibili.com/video/{bvid}",
+                            images=[],
+                            share_url=f"https://www.bilibili.com/video/{bvid}",
+                        ))
+
+                    has_more = (page_num * count) < total_count
+                    next_cursor = cursor + len(posts)
+            except Exception as e:
+                return UserProfileResponse(
+                    success=False,
+                    platform="bilibili",
+                    platform_name="哔哩哔哩",
+                    error=f"拉取 B站 UP 主投稿列表异常: {str(e)}",
+                )
+
+        return UserProfileResponse(
+            success=True,
+            platform="bilibili",
+            platform_name="哔哩哔哩",
+            user=user_info,
+            posts=posts,
+            has_more=has_more,
+            max_cursor=next_cursor,
+        )

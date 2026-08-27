@@ -99,6 +99,8 @@ class BilibiliExtractor(BaseExtractor):
         if not yt_dlp:
             return None
         try:
+            import os
+            proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
@@ -108,6 +110,8 @@ class BilibiliExtractor(BaseExtractor):
                     "Referer": "https://www.bilibili.com/",
                 },
             }
+            if proxy:
+                ydl_opts["proxy"] = proxy
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(target_url, download=False)
                 return info
@@ -329,6 +333,7 @@ class BilibiliExtractor(BaseExtractor):
             video_url = ""
             audio_url = ""
             ratio = "720P 高清"
+            quality_options: List[QualityOption] = []
 
             try:
                 play_resp = await client.get(play_api)
@@ -336,17 +341,49 @@ class BilibiliExtractor(BaseExtractor):
                     play_data = play_resp.json().get("data", {})
                     dash = play_data.get("dash", {})
                     if dash:
-                        video_streams = dash.get("video", [])
-                        if video_streams:
-                            top_v = video_streams[0]
-                            video_url = top_v.get("baseUrl") or (top_v.get("backupUrl", [""])[0] if top_v.get("backupUrl") else "")
-                            q_id = top_v.get("id", 64)
-                            ratio = QUALITY_MAP.get(q_id, "720P 高清")
-
+                        # 1. 提取最佳音频轨
                         audio_streams = dash.get("audio", []) or dash.get("dolby", {}).get("audio", [])
                         if audio_streams:
                             top_a = audio_streams[0]
                             audio_url = top_a.get("baseUrl") or (top_a.get("backupUrl", [""])[0] if top_a.get("backupUrl") else "")
+
+                        # 2. 遍历所有可用视频流
+                        video_streams = dash.get("video", [])
+                        seen_qids = set()
+                        for v in video_streams:
+                            qid = v.get("id", 64)
+                            v_url = v.get("baseUrl") or (v.get("backupUrl", [""])[0] if v.get("backupUrl") else "")
+                            w = v.get("width") or 0
+                            h = v.get("height") or 0
+                            codecs = v.get("codecs", "H.264")
+                            is_avc = "avc" in codecs.lower()
+
+                            # 优先保留 AVC (H.264)
+                            if qid in seen_qids:
+                                continue
+                            seen_qids.add(qid)
+
+                            q_name = QUALITY_MAP.get(qid, f"{h}P" if h else "标清")
+                            label_text = f"{q_name} ({w}x{h})" if w and h else q_name
+
+                            quality_options.append(QualityOption(
+                                id=str(qid),
+                                label=label_text,
+                                video_url=v_url,
+                                audio_url=audio_url,
+                                width=w,
+                                height=h,
+                                codec="H.264" if is_avc else codecs,
+                            ))
+
+                        if quality_options:
+                            video_url = quality_options[0].video_url
+                            ratio = quality_options[0].label.split("(")[0].strip()
+                        elif video_streams:
+                            top_v = video_streams[0]
+                            video_url = top_v.get("baseUrl") or (top_v.get("backupUrl", [""])[0] if top_v.get("backupUrl") else "")
+                            q_id = top_v.get("id", 64)
+                            ratio = QUALITY_MAP.get(q_id, "720P 高清")
             except Exception:
                 pass
 
@@ -372,6 +409,7 @@ class BilibiliExtractor(BaseExtractor):
                     audio_url=audio_url,
                     ratio=ratio,
                     duration=duration,
+                    qualities=quality_options,
                 ),
                 create_time=pubdate,
             )

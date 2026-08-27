@@ -260,13 +260,17 @@ function renderResult(data) {
             </div>
         `;
 
+        const hasQualities = video.qualities && video.qualities.length > 0;
+        const defaultQ = hasQualities ? video.qualities[0] : null;
+        const defaultQName = defaultQ ? defaultQ.label.split("(")[0].trim() : (video.ratio || '高清');
+
         const primaryBtnClick = isBilibili && audioUrl
-            ? `triggerMuxDownload('${noWmUrl}', '${audioUrl}', '${cleanTitle}_完整高清.mp4')`
-            : `triggerDownload('${noWmUrl}', '${cleanTitle}_${isPipixia ? '高清' : (isBilibili ? '高清' : (isTwitter ? '高清' : '无水印'))}.mp4')`;
+            ? `triggerMuxDownload('${defaultQ ? defaultQ.video_url : noWmUrl}', '${defaultQ ? defaultQ.audio_url : audioUrl}', '${cleanTitle}_${defaultQName}.mp4')`
+            : `triggerDownload('${defaultQ ? defaultQ.video_url : noWmUrl}', '${cleanTitle}_${defaultQName}.mp4')`;
 
         const primaryBtnTitle = isBilibili 
-            ? `下载高清视频 (${video.ratio || '1080P'} 带声音 MP4)` 
-            : (isPipixia || isTwitter ? `下载高清视频 (${video.ratio || '高清'} MP4)` : '下载无水印视频 (高清 MP4)');
+            ? `下载高清视频 (${defaultQName} 带声音 MP4)` 
+            : `下载高清视频 (${defaultQName} MP4)`;
 
         // 多画质下拉选择器 (支持 B站 与 Twitter 等)
         let qualitySelectorHtml = "";
@@ -324,13 +328,14 @@ function renderResult(data) {
             </div>
         `;
     } else if (type === "images") {
-        // 图集展示
+        // 图集展示 (优雅平铺网格，绝不重叠)
         const galleryItems = images.map((imgUrl, idx) => `
-            <div class="gallery-item">
+            <div class="gallery-item" title="点击新窗口查看原图" onclick="window.open('${imgUrl}', '_blank')">
                 <img src="${imgUrl}" alt="图片 ${idx + 1}" loading="lazy" referrerpolicy="no-referrer">
-                <div class="gallery-item-action">
-                    <button class="btn-secondary-sm" onclick="triggerDownload('${imgUrl}', '${cleanTitle}_图${idx + 1}.jpg')">
-                        <i class="fa-solid fa-download"></i> 图 ${idx + 1}
+                <div class="gallery-item-action" onclick="event.stopPropagation()">
+                    <span class="gallery-idx">#${idx + 1}</span>
+                    <button class="btn-gallery-dl" onclick="triggerDownload('${imgUrl}', '${cleanTitle}_图${idx + 1}.jpg')" title="下载此图">
+                        <i class="fa-solid fa-download"></i> 保存
                     </button>
                 </div>
             </div>
@@ -338,6 +343,10 @@ function renderResult(data) {
 
         mediaHtml = `
             <div class="images-gallery-container">
+                <div class="gallery-header">
+                    <span class="gallery-count-badge"><i class="fa-regular fa-images"></i> 共 ${images.length} 张高清原图</span>
+                    <span style="font-size: 11px; color: var(--text-dim);">点击图片预览原图</span>
+                </div>
                 <div class="gallery-grid">
                     ${galleryItems}
                 </div>
@@ -347,7 +356,7 @@ function renderResult(data) {
         actionsHtml = `
             <div class="download-action-grid">
                 <button class="btn-primary grid-span-2" onclick="downloadAllImages(${JSON.stringify(images).replace(/"/g, '&quot;')}, '${cleanTitle}')">
-                    <i class="fa-solid fa-download"></i> 批量下载全部高清图片 (${images.length}张)
+                    <i class="fa-solid fa-download"></i> 批量下载全部高清原图 (${images.length}张)
                 </button>
                 ${music && music.url ? `
                 <button class="btn-secondary grid-span-2 btn-outline-cyan" onclick="triggerDownload('${music.url}', '${cleanTitle}_原声.mp3')">
@@ -382,7 +391,7 @@ function renderResult(data) {
     }
 
     resultContainer.innerHTML = `
-        <div class="result-layout">
+        <div class="result-layout ${type === 'images' ? 'is-images-layout' : ''}">
             <div class="media-column">
                 ${mediaHtml}
             </div>

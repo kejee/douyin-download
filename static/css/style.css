@@ -922,20 +922,24 @@ body {
 }
 
 @media (min-width: 768px) {
+    /* 竖屏短视频 (抖音/快手)：紧凑竖屏 3.5 : 6.5 */
     .result-layout {
         display: grid;
         grid-template-columns: 260px 1fr;
         gap: 24px;
         align-items: start;
     }
+    /* 横屏视频 (B站/YouTube)：沉浸大视窗 5.5 : 4.5 黄金比例 */
     .result-layout.is-landscape-layout {
-        grid-template-columns: 360px 1fr;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 26px;
     }
 }
 
 @media (min-width: 1024px) {
     .result-layout.is-landscape-layout {
-        grid-template-columns: 420px 1fr;
+        grid-template-columns: 1.25fr 1fr;
+        gap: 28px;
     }
 }
 
@@ -972,14 +976,15 @@ body {
     transition: all 0.3s ease;
 }
 
-/* 横屏视频 (如 B站 / YouTube) 专属大画幅比例 */
+/* 横屏视频 (如 B站 / YouTube) 专属 16:9 大视窗 */
 .media-preview-container.is-landscape {
     aspect-ratio: 16 / 9;
+    width: 100%;
     max-width: 100%;
-    max-height: 280px;
-    min-height: 200px;
+    max-height: 380px;
+    min-height: 220px;
     background: #000;
-    box-shadow: 0 12px 35px -8px rgba(0, 0, 0, 0.6), 0 0 20px rgba(56, 189, 248, 0.12);
+    box-shadow: 0 16px 40px -10px rgba(0, 0, 0, 0.7), 0 0 25px rgba(56, 189, 248, 0.15);
 }
 
 @media (min-width: 768px) {
@@ -989,7 +994,7 @@ body {
     }
     .media-preview-container.is-landscape {
         max-width: 100%;
-        max-height: 280px;
+        max-height: 380px;
     }
 }
 

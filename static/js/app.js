@@ -282,16 +282,25 @@ async function copyToClipboard(text, label = "链接") {
     }
 }
 
-// 触发代理下载
+// 触发下载 (统一接入任务管理器与真实流式进度)
 function triggerDownload(url, filename) {
-    const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
-    const a = document.createElement("a");
-    a.href = downloadUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    showToast(`正在下载: ${filename}`, "info");
+    if (!url) return;
+    const safeFilename = filename || "download_media.mp4";
+    const taskId = `dl_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    window.taskQueue.push({
+        id: taskId,
+        title: safeFilename,
+        filename: safeFilename,
+        directUrl: url,
+        status: 'waiting',
+        progress: 0,
+        errorMsg: null,
+    });
+
+    window.isTaskQueuePaused = false;
+    toggleTaskManager(true);
+    scheduleTaskQueue();
 }
 
 // 解析主逻辑
@@ -620,18 +629,17 @@ function renderResult(data) {
                     </div>
                     <div class="episodes-tools">
                         <input type="text" class="episodes-search-input" name="search_${Date.now()}" id="episodeSearchInput" placeholder="🔍 搜索分集/序号..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="" oninput="onEpisodeSearch(this.value)">
-                        <button class="btn-episodes-tool" onclick="refreshCurrentEpisodes()" title="重新检测并刷新分P列表">
-                            <i class="fa-solid fa-arrows-rotate"></i> 刷新分P
-                        </button>
-                        <button class="btn-episodes-tool" onclick="copyAllEpisodesLinks()" title="一键复制全部分P链接">
-                            <i class="fa-regular fa-copy"></i> 复制全部链接
-                        </button>
-                        <button class="btn-episodes-tool btn-episodes-dl" onclick="downloadAllEpisodes('folder')" title="下载全部并保存到本地文件夹" style="background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8;">
-                            <i class="fa-solid fa-folder-arrow-down"></i> 保存到文件夹
-                        </button>
-                        <button class="btn-episodes-tool" onclick="downloadAllEpisodes('direct')" title="依次触发全部选集下载">
-                            <i class="fa-solid fa-download"></i> 批量下载
-                        </button>
+                        <div class="episodes-btn-group">
+                            <button class="btn-episodes-tool" onclick="refreshCurrentEpisodes()" title="重新检测并刷新分P列表">
+                                <i class="fa-solid fa-arrows-rotate"></i> 刷新分P
+                            </button>
+                            <button class="btn-episodes-tool" onclick="copyAllEpisodesLinks()" title="一键复制全部分P链接">
+                                <i class="fa-regular fa-copy"></i> 复制全部
+                            </button>
+                            <button class="btn-episodes-tool btn-episodes-dl" onclick="downloadAllEpisodes('direct')" title="依次触发全部选集下载" style="background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8;">
+                                <i class="fa-solid fa-download"></i> 批量下载
+                            </button>
+                        </div>
                     </div>
                 </div>
                 ${displaySeasonTitle ? `
@@ -778,40 +786,28 @@ function onEpisodeSearch(keyword) {
     });
 }
 
-// 下载单个指定分P集
-async function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
+// 下载单个指定分P集 (接入任务管理器)
+function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
     if (!shareUrl) return;
-    const seasonTitle = (window.currentMediaData && (window.currentMediaData.season_title || window.currentMediaData.title)) || "合集视频";
+    const seasonTitle = (window.currentMediaData && (window.currentMediaData.season_title || window.currentMediaData.title)) || "视频合集";
     const safeSeasonTitle = seasonTitle.replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30);
     const pageStr = String(pageNum).padStart(2, '0');
     const safeEpTitle = `${safeSeasonTitle}_P${pageStr}_${(epTitle || `第${pageNum}集`).replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30)}.mp4`;
 
-    showToast(`正在提取 P${pageNum} 高清下载通道...`, "info");
+    const taskId = `single_p${pageNum}_${Date.now()}`;
+    window.taskQueue.push({
+        id: taskId,
+        title: `P${pageNum}: ${epTitle || `第${pageNum}集`}`,
+        filename: safeEpTitle,
+        share_url: shareUrl,
+        status: 'waiting',
+        progress: 0,
+        errorMsg: null,
+    });
 
-    try {
-        const sessdata = getBiliSessdata();
-        const parseResp = await fetch("/api/parse", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: shareUrl, sessdata: sessdata || null }),
-        });
-        const parseData = await parseResp.json();
-
-        if (parseResp.ok && parseData.success && parseData.video) {
-            const vUrl = parseData.video.no_watermark_url;
-            const aUrl = parseData.video.audio_url;
-            if (aUrl) {
-                triggerMuxDownload(vUrl, aUrl, safeEpTitle);
-            } else {
-                triggerDownload(vUrl, safeEpTitle);
-            }
-            showToast(`已成功发起 P${pageNum} 下载任务！`, "success");
-        } else {
-            showToast(parseData.detail || parseData.error || `P${pageNum} 提取下载链接失败`, "error");
-        }
-    } catch (err) {
-        showToast("网络请求异常: " + err.message, "error");
-    }
+    toggleTaskManager(true);
+    showToast(`已将 P${pageNum} 加入下载任务队列`, "info");
+    processTaskQueue();
 }
 
 // 一键复制全部分P链接
@@ -853,13 +849,17 @@ function toggleTaskManager(show = true) {
         renderTaskManagerUI();
     } else {
         drawer.style.display = "none";
-        // 如果还有未完成的任务，展示最小化气泡
-        const activeCount = window.taskQueue.filter(t => t.status === 'running' || t.status === 'waiting').length;
-        if (activeCount > 0) {
+        // 只要队列中有任务，关闭时常驻显示悬浮气泡，方便随时再次展开
+        if (window.taskQueue.length > 0) {
             bubble.style.display = "flex";
             const successCount = window.taskQueue.filter(t => t.status === 'success').length;
+            const runningCount = window.taskQueue.filter(t => t.status === 'running').length;
             const bubbleText = document.getElementById("tmBubbleText");
-            if (bubbleText) bubbleText.textContent = `下载中 (${successCount}/${window.taskQueue.length})`;
+            if (bubbleText) {
+                bubbleText.textContent = runningCount > 0 
+                    ? `下载中 (${successCount}/${window.taskQueue.length})` 
+                    : `任务列表 (${successCount}/${window.taskQueue.length})`;
+            }
         } else {
             bubble.style.display = "none";
         }
@@ -880,6 +880,15 @@ function renderTaskManagerUI() {
 
     const totalBadge = document.getElementById("taskTotalBadge");
     if (totalBadge) totalBadge.textContent = `${total} 项`;
+    const navBadge = document.getElementById("navTaskBadge");
+    if (navBadge) {
+        if (total > 0) {
+            navBadge.style.display = "inline-block";
+            navBadge.textContent = total;
+        } else {
+            navBadge.style.display = "none";
+        }
+    }
     const rEl = document.getElementById("statRunning"); if (rEl) rEl.textContent = running;
     const wEl = document.getElementById("statWaiting"); if (wEl) wEl.textContent = waiting;
     const pEl = document.getElementById("statPaused"); if (pEl) pEl.textContent = paused;
@@ -959,6 +968,7 @@ function scheduleTaskQueue() {
         runSingleTask(task);
     });
 }
+window.processTaskQueue = scheduleTaskQueue;
 
 // 执行单个下载任务
 async function runSingleTask(task) {
@@ -971,65 +981,74 @@ async function runSingleTask(task) {
     task.abortCtrl = abortCtrl;
 
     try {
-        const sessdata = getBiliSessdata();
-        const parseResp = await fetch("/api/parse", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: task.share_url, sessdata: sessdata || null }),
-            signal: abortCtrl.signal,
-        });
-        const parseData = await parseResp.json();
-        
-        if (!parseResp.ok || !parseData.success || !parseData.video) {
-            throw new Error(parseData.detail || parseData.error || "提取视频流失败");
+        let vUrl = task.directUrl || task.videoUrl;
+        let aUrl = task.audioUrl;
+
+        // 如果需要先解析分享链接 (如分P单集或博主作品)
+        if (!vUrl && task.share_url) {
+            const sessdata = getBiliSessdata();
+            const parseResp = await fetch("/api/parse", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url: task.share_url, sessdata: sessdata || null }),
+                signal: abortCtrl.signal,
+            });
+            const parseData = await parseResp.json();
+            
+            if (!parseResp.ok || !parseData.success || !parseData.video) {
+                throw new Error(parseData.detail || parseData.error || "提取视频流失败");
+            }
+
+            vUrl = parseData.video.no_watermark_url;
+            aUrl = parseData.video.audio_url;
         }
 
-        task.progress = 35;
+        if (!vUrl) {
+            throw new Error("无效的媒体下载地址");
+        }
+
+        task.progress = 15;
         renderTaskManagerUI();
 
-        const vUrl = parseData.video.no_watermark_url;
-        const aUrl = parseData.video.audio_url;
+        const streamUrl = aUrl 
+            ? `/api/stream/mux?video_url=${encodeURIComponent(vUrl)}&audio_url=${encodeURIComponent(aUrl)}&filename=${encodeURIComponent(task.filename)}`
+            : `/api/download?url=${encodeURIComponent(vUrl)}&filename=${encodeURIComponent(task.filename)}`;
 
-        // 如果是直接保存到电脑本地文件夹 (Chrome/Edge File System)
-        if (task.mode === 'folder' && window.taskTargetFolder) {
-            const streamUrl = aUrl 
-                ? `/api/stream/mux?video_url=${encodeURIComponent(vUrl)}&audio_url=${encodeURIComponent(aUrl)}&filename=${encodeURIComponent(task.filename)}`
-                : `/api/download?url=${encodeURIComponent(vUrl)}&filename=${encodeURIComponent(task.filename)}`;
+        const fileResp = await fetch(streamUrl, { signal: abortCtrl.signal });
+        if (!fileResp.ok) throw new Error("下载数据流响应异常 (" + fileResp.status + ")");
 
-            const fileHandle = await window.taskTargetFolder.getFileHandle(task.filename, { create: true });
-            const writable = await fileHandle.createWritable();
+        const contentLength = +fileResp.headers.get('Content-Length') || 0;
+        const reader = fileResp.body.getReader();
+        const chunks = [];
+        let received = 0;
 
-            const fileResp = await fetch(streamUrl, { signal: abortCtrl.signal });
-            if (!fileResp.ok) throw new Error("流式下载网络响应异常");
-
-            // 流式读取并更新进度
-            const contentLength = +fileResp.headers.get('Content-Length') || 0;
-            if (contentLength && fileResp.body) {
-                const reader = fileResp.body.getReader();
-                let received = 0;
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    await writable.write(value);
-                    received += value.length;
-                    task.progress = 35 + Math.round((received / contentLength) * 60);
-                    renderTaskManagerUI();
-                }
-                await writable.close();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            if (contentLength > 0) {
+                task.progress = 15 + Math.min(82, Math.round((received / contentLength) * 82));
             } else {
-                await fileResp.body.pipeTo(writable);
+                task.progress = Math.min(95, 15 + Math.round(received / (1024 * 1024 * 2)));
             }
-        } else {
-            // 普通浏览器多任务下载
-            if (aUrl) {
-                triggerMuxDownload(vUrl, aUrl, task.filename);
-            } else {
-                triggerDownload(vUrl, task.filename);
-            }
+            renderTaskManagerUI();
         }
+
+        // 数据流全部接收完毕，真正触发保存到本地
+        const blob = new Blob(chunks, { type: 'video/mp4' });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = task.filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
 
         task.status = 'success';
         task.progress = 100;
+        renderTaskManagerUI();
     } catch (err) {
         if (err.name === 'AbortError') {
             task.status = 'paused';
@@ -1205,24 +1224,29 @@ function downloadAllImages(imgList, baseTitle) {
     });
 }
 
-// 内存混流下载 (针对 B站 等 DASH 音视频分离格式)
+// 内存混流下载 (统一接入任务管理器与真实流式进度)
 function triggerMuxDownload(videoUrl, audioUrl, filename) {
     if (!videoUrl) {
         showToast("视频链接无效", "error");
         return;
     }
     const safeFilename = filename || "bilibili_video.mp4";
-    const muxUrl = `/api/stream/mux?video_url=${encodeURIComponent(videoUrl)}&audio_url=${encodeURIComponent(audioUrl || '')}&filename=${encodeURIComponent(safeFilename)}`;
-    
-    showToast("正在启动内存流式混流引擎，即将开始下载...", "info");
-    
-    const a = document.createElement("a");
-    a.href = muxUrl;
-    a.download = safeFilename;
-    a.style.display = "none";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    const taskId = `mux_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    window.taskQueue.push({
+        id: taskId,
+        title: safeFilename,
+        filename: safeFilename,
+        videoUrl: videoUrl,
+        audioUrl: audioUrl,
+        status: 'waiting',
+        progress: 0,
+        errorMsg: null,
+    });
+
+    window.isTaskQueuePaused = false;
+    toggleTaskManager(true);
+    scheduleTaskQueue();
 }
 
 // 响应画质下拉框切换

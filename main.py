@@ -14,7 +14,7 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.2.2.6"
+APP_VERSION = "2.2.3.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",

@@ -352,7 +352,8 @@ class DouyinExtractor(BaseExtractor):
             cover_data = video_data.get("cover", {})
             cover_url = cover_data.get("url_list", [""])[0] if cover_data.get("url_list") else ""
 
-            duration = video_data.get("duration", 0)
+            duration_raw = video_data.get("duration", 0)
+            duration = int(duration_raw / 1000) if duration_raw else 0
             width = video_data.get("width", 0)
             height = video_data.get("height", 0)
             ratio = video_data.get("ratio", "720p")

@@ -272,7 +272,7 @@ class DouyinParser:
                     "id": aweme_id,
                     "title": title,
                     "cover": cover_url,
-                    "duration": video_info.get("duration", 0),
+                    "duration": int(video_info.get("duration", 0) / 1000) if video_info.get("duration") else 0,
                     "author": author_info,
                     "statistics": statistics,
                     "music": music_info,

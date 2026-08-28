@@ -171,7 +171,8 @@ class PipixiaExtractor(BaseExtractor):
 
                 width = int(video_info.get("video_width", 0) or 0)
                 height = int(video_info.get("video_height", 0) or 0)
-                duration = int(video_info.get("duration", 0) or 0)
+                duration_raw = int(video_info.get("duration", 0) or 0)
+                duration = int(duration_raw / 1000) if duration_raw > 1000 else duration_raw
 
                 return MediaResponse(
                     success=True,

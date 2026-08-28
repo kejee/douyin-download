@@ -836,6 +836,85 @@ window.taskQueue = [];
 window.maxConcurrentTasks = 2; // 最大并发下载数
 window.isTaskQueuePaused = false;
 window.taskTargetFolder = null; // 本地文件夹 Handle
+window.downloadDestination = localStorage.getItem("download_destination") || "local";
+window.serverConfig = null;
+
+// 设置下载目的地 (local: 本地浏览器, server: NAS/服务端归档)
+function setDownloadDestination(mode) {
+    window.downloadDestination = mode;
+    localStorage.setItem("download_destination", mode);
+
+    const localBtn = document.getElementById("destLocalBtn");
+    const serverBtn = document.getElementById("destServerBtn");
+    const tipEl = document.getElementById("destPathTip");
+
+    if (localBtn && serverBtn) {
+        if (mode === "server") {
+            serverBtn.classList.add("active");
+            localBtn.classList.remove("active");
+            if (tipEl) {
+                tipEl.style.display = "inline-block";
+                tipEl.textContent = (window.serverConfig && window.serverConfig.download_dir) || "/downloads";
+            }
+        } else {
+            localBtn.classList.add("active");
+            serverBtn.classList.remove("active");
+            if (tipEl) tipEl.style.display = "none";
+        }
+    }
+}
+
+// 初始化服务端/NAS配置与SSE
+async function initServerArchiving() {
+    try {
+        const resp = await fetch("/api/server/config");
+        if (resp.ok) {
+            const cfg = await resp.json();
+            window.serverConfig = cfg;
+            const tipEl = document.getElementById("destPathTip");
+            if (tipEl && cfg.download_dir) {
+                tipEl.textContent = cfg.download_dir;
+            }
+            if (cfg.is_nas_mode && !localStorage.getItem("download_destination")) {
+                setDownloadDestination("server");
+            } else {
+                setDownloadDestination(window.downloadDestination);
+            }
+        }
+    } catch (e) {
+        console.warn("探测服务端归档配置失败:", e);
+    }
+
+    try {
+        const evtSource = new EventSource("/api/server/events");
+        evtSource.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data);
+                const { event, data } = msg;
+                if (data && data.id) {
+                    const localTask = window.taskQueue.find(t => t.id === data.id);
+                    if (localTask) {
+                        localTask.status = data.status;
+                        localTask.progress = data.progress;
+                        localTask.errorMsg = data.error;
+                        renderTaskManagerUI();
+                    } else if (event === "task_added" || data.status === "running") {
+                        window.taskQueue.push({
+                            id: data.id,
+                            title: `[NAS] ${data.title}`,
+                            filename: data.filename,
+                            status: data.status,
+                            progress: data.progress,
+                            errorMsg: data.error,
+                            isServerTask: true,
+                        });
+                        renderTaskManagerUI();
+                    }
+                }
+            } catch (err) {}
+        };
+    } catch (err) {}
+}
 
 // 切换任务管理器显示/隐藏/最小化
 function toggleTaskManager(show = true) {
@@ -1127,30 +1206,44 @@ function clearCompletedTasks() {
 }
 
 // 批量下载当前选集所有分集入口
-async function downloadAllEpisodes(mode = 'folder') {
+async function downloadAllEpisodes(mode = 'direct') {
     if (!window.currentMediaData || !window.currentMediaData.episodes) return;
     const episodes = window.currentMediaData.episodes;
     const seasonTitle = window.currentMediaData.season_title || window.currentMediaData.title || "合集视频";
     const safeSeasonTitle = seasonTitle.replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 40);
 
-    let targetFolderHandle = null;
+    // 如果用户当前选择了 NAS/服务端归档模式
+    if (window.downloadDestination === 'server') {
+        const sessdata = getBiliSessdata();
+        const payload = {
+            tasks: episodes.map(ep => ({
+                url: ep.share_url,
+                title: ep.title || `第${ep.page}集`,
+                season_title: seasonTitle,
+                platform: "bilibili",
+                page_num: ep.page,
+                sessdata: sessdata || null,
+            }))
+        };
 
-    if (mode === 'folder') {
-        if (window.showDirectoryPicker) {
-            try {
-                showToast("请在弹窗中选择用于保存合集的电脑本地文件夹...", "info");
-                const parentDir = await window.showDirectoryPicker();
-                targetFolderHandle = await parentDir.getDirectoryHandle(safeSeasonTitle, { create: true });
-                window.taskTargetFolder = targetFolderHandle;
-                showToast(`已选定本地文件夹 [${safeSeasonTitle}]，正在加入批量下载队列...`, "success");
-            } catch (err) {
-                if (err.name === 'AbortError') return;
-                showToast("未授予本地文件夹权限，已自动切换为浏览器下载模式", "info");
-                mode = 'direct';
+        try {
+            showToast(`正在向 NAS/服务端 提交 ${episodes.length} 个合集分P归档任务...`, "info");
+            const resp = await fetch("/api/server/download", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const res = await resp.json();
+            if (resp.ok && res.success) {
+                toggleTaskManager(true);
+                showToast(`🎉 成功提交！NAS 正在自动在 /downloads/${safeSeasonTitle} 下建目录归档下载！`, "success");
+            } else {
+                showToast(res.detail || "提交服务端归档失败", "error");
             }
-        } else {
-            mode = 'direct';
+        } catch (e) {
+            showToast("网络请求异常: " + e.message, "error");
         }
+        return;
     }
 
     // 构建任务列表并加入全局队列
@@ -1755,4 +1848,5 @@ function parseAndOpenMedia(url) {
 // 页面初始化
 document.addEventListener("DOMContentLoaded", () => {
     updateBiliHelperBars();
+    initServerArchiving();
 });

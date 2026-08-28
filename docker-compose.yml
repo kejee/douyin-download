@@ -10,8 +10,11 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      # NAS / 服务端视频归档存储路径 (可挂载宿主机或 NAS 共享目录)
+      - ./downloads:/downloads
     environment:
       - TZ=Asia/Shanghai
+      - DOWNLOAD_DIR=/downloads
       # 可选：配置 B 站普通账号/大会员的 SESSDATA 或完整 Cookie，即可解锁 1080P/4K 画质解析
       # - SESSDATA=your_sessdata_here
       # - BILIBILI_COOKIE=SESSDATA=xxx; buvid3=xxx

@@ -15,7 +15,7 @@
         rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.2.5.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.3.0.0">
 </head>
 
 <body>
@@ -215,7 +215,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.2.5.0</span>
+                    <span class="badge badge-version">v2.3.0.0</span>
                 </div>
             </div>
         </footer>
@@ -323,6 +323,19 @@
                 </button>
             </div>
         </div>
+        <!-- 存储目标模式选择 (本地设备 vs NAS/服务端直接归档) -->
+        <div class="task-destination-row" id="taskDestinationRow">
+            <span class="dest-label"><i class="fa-solid fa-folder-tree"></i> 存储目的地:</span>
+            <div class="dest-toggle-group">
+                <button type="button" class="btn-dest-toggle active" id="destLocalBtn" onclick="setDownloadDestination('local')" title="通过当前浏览器直接下载保存">
+                    <i class="fa-solid fa-laptop"></i> 存到当前设备
+                </button>
+                <button type="button" class="btn-dest-toggle" id="destServerBtn" onclick="setDownloadDestination('server')" title="直接在 NAS/服务端自动建合集目录归档">
+                    <i class="fa-solid fa-server text-gradient"></i> NAS/服务端归档
+                </button>
+            </div>
+            <span class="dest-path-tip" id="destPathTip" style="display: none;" title="NAS 服务端下载根路径">/downloads</span>
+        </div>
         <div class="task-manager-summary">
             <div class="task-stat-bar">
                 <div class="task-stat-item"><span class="dot dot-running"></span>进行: <b id="statRunning">0</b></div>
@@ -349,7 +362,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.2.5.0"></script>
+    <script src="/static/js/app.js?v=2.3.0.0"></script>
 </body>
 
 </html>

@@ -1,0 +1,90 @@
+name: Build Desktop Clients & Releases
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-desktop:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: UniversalDownloader-Windows-x64.zip
+            asset_path: dist/UniversalDownloader.exe
+          - os: macos-latest
+            artifact_name: UniversalDownloader-macOS-Universal.zip
+            asset_path: dist/UniversalDownloader.app
+          - os: ubuntu-22.04
+            artifact_name: UniversalDownloader-Linux-x86_64.tar.gz
+            asset_path: dist/UniversalDownloader
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev libappindicator3-dev ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Desktop Executable with PyInstaller
+        run: |
+          pyinstaller desktop.spec --clean --noconfirm
+
+      - name: Package Artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/UniversalDownloader.exe -DestinationPath dist/UniversalDownloader-Windows-x64.zip
+
+      - name: Package Artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist && zip -r UniversalDownloader-macOS-Universal.zip UniversalDownloader.app
+
+      - name: Package Artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd dist && tar -czvf UniversalDownloader-Linux-x86_64.tar.gz UniversalDownloader
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+
+  release:
+    name: Create GitHub Release
+    needs: build-desktop
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Release to GitHub
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

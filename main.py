@@ -14,7 +14,7 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 
-APP_VERSION = "2.2.5.0"
+APP_VERSION = "2.3.0.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -244,6 +244,90 @@ async def stream_mux_download(
             "Accept-Ranges": "bytes",
         },
     )
+
+# ==========================================================================
+# 服务端 / NAS 自动归档与任务管理接口
+# ==========================================================================
+from downloader import server_downloader
+
+class ServerDownloadItem(BaseModel):
+    url: Optional[str] = None
+    direct_url: Optional[str] = None
+    audio_url: Optional[str] = None
+    title: str = "视频"
+    season_title: Optional[str] = None
+    platform: str = "media"
+    page_num: Optional[int] = None
+    sessdata: Optional[str] = None
+
+class ServerBatchDownloadRequest(BaseModel):
+    tasks: List[ServerDownloadItem]
+
+@app.get("/api/server/config")
+async def get_server_config():
+    """获取服务端/NAS 存储配置"""
+    return server_downloader.get_config()
+
+@app.post("/api/server/download")
+async def create_server_downloads(req: ServerBatchDownloadRequest):
+    """提交一个或多个下载任务到服务端/NAS 自动归档"""
+    created_tasks = []
+    for item in req.tasks:
+        task = server_downloader.add_task(
+            url=item.url,
+            direct_url=item.direct_url,
+            audio_url=item.audio_url,
+            title=item.title,
+            season_title=item.season_title,
+            platform=item.platform,
+            page_num=item.page_num,
+            sessdata=item.sessdata,
+        )
+        created_tasks.append(task)
+    return {"success": True, "count": len(created_tasks), "tasks": created_tasks}
+
+@app.get("/api/server/tasks")
+async def list_server_tasks():
+    """获取当前服务端任务队列"""
+    return {"tasks": list(server_downloader.tasks.values())}
+
+@app.post("/api/server/tasks/{task_id}/pause")
+async def pause_server_task(task_id: str):
+    ok = server_downloader.pause_task(task_id)
+    return {"success": ok}
+
+@app.post("/api/server/tasks/{task_id}/resume")
+async def resume_server_task(task_id: str):
+    ok = server_downloader.resume_task(task_id)
+    return {"success": ok}
+
+@app.post("/api/server/tasks/{task_id}/cancel")
+async def cancel_server_task(task_id: str):
+    ok = server_downloader.cancel_task(task_id)
+    return {"success": ok}
+
+@app.post("/api/server/tasks/clear")
+async def clear_server_tasks():
+    count = server_downloader.clear_completed()
+    return {"success": True, "cleared_count": count}
+
+@app.get("/api/server/events")
+async def server_events():
+    """SSE 实时推送服务端下载与归档进度"""
+    queue = server_downloader.subscribe()
+
+    async def event_generator():
+        import json
+        try:
+            while True:
+                msg = await queue.get()
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            server_downloader.unsubscribe(queue)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn

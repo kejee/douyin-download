@@ -16,6 +16,7 @@ from extractors.base import (
     MusicInfo,
     VideoInfo,
     QualityOption,
+    VideoEpisode,
     UserProfileInfo,
     UserPostItem,
     UserProfileResponse,
@@ -165,158 +166,35 @@ class BilibiliExtractor(BaseExtractor):
                 error="未能识别出有效的 B站 视频链接或 BV号，请确认后重试",
             )
 
-        video_page_url = f"https://www.bilibili.com/video/{bvid}"
+        # 识别 URL 中的分P参数 (如 ?p=2)
+        p_match = re.search(r"[?&]p=(\d+)", url)
+        selected_page = int(p_match.group(1)) if p_match else 1
+
         custom_headers = dict(self.headers)
         if sessdata:
             custom_headers["Cookie"] = f"SESSDATA={sessdata}"
 
-        # 并发获取官方 View 接口以获得 UP主真实高清头像与互动数据
-        up_avatar = ""
-        try:
-            async with httpx.AsyncClient(headers=custom_headers, timeout=5.0) as client:
-                r_v = await client.get(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}")
-                if r_v.status_code == 200:
-                    d_v = r_v.json().get("data", {})
-                    up_avatar = d_v.get("owner", {}).get("face", "")
-        except Exception:
-            pass
+        # 1. 获取官方 View 接口 (获取分P列表 pages、合集 ugc_season、UP主信息、互动数据等)
+        view_param = f"bvid={bvid}" if bvid.startswith("BV") else f"aid={bvid.lower().replace('av', '')}"
+        view_api = f"https://api.bilibili.com/x/web-interface/view?{view_param}"
 
-        # 方案一：优先通过 yt-dlp 异步提取 1080P / 720P 最高画质与音频轨
-        loop = asyncio.get_event_loop()
-        ytdl_info = await loop.run_in_executor(None, self._extract_via_ytdlp, video_page_url, sessdata)
-
-        if ytdl_info:
-            formats = ytdl_info.get("formats", [])
-            video_formats = [f for f in formats if f.get("vcodec") != "none" and f.get("url")]
-            audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")]
-
-            if video_formats:
-                # 最佳音频流及其大小
-                top_a = audio_formats[-1] if audio_formats else None
-                audio_url = top_a.get("url", "") if top_a else ""
-                audio_bytes = int(top_a.get("filesize") or top_a.get("filesize_approx") or 0) if top_a else 0
-
-                # 收集并去重多清晰度画质选项 (优先挑选 H.264/AVC 编码)
-                quality_options: List[QualityOption] = []
-                seen_res = set()
-
-                # 按照画质高到低排序
-                for f in reversed(video_formats):
-                    w = f.get("width") or 0
-                    h = f.get("height") or 0
-                    res_key = f"{w}x{h}" if w and h else f.get("resolution", "unknown")
-                    is_avc = "avc" in f.get("vcodec", "").lower() or "h264" in f.get("vcodec", "").lower()
-
-                    # 同一分辨率优先保留 AVC (H.264)
-                    if res_key in seen_res:
-                        continue
-                    
-                    if not is_avc:
-                        # 检查同分辨率是否有 AVC 版本
-                        has_avc = any(
-                            ("avc" in item.get("vcodec", "").lower() or "h264" in item.get("vcodec", "").lower())
-                            and (item.get("width") == w and item.get("height") == h)
-                            for item in video_formats
-                        )
-                        if has_avc:
-                            continue
-
-                    seen_res.add(res_key)
-
-                    # 计算预估文件大小 (视频 + 音频)
-                    v_bytes = int(f.get("filesize") or f.get("filesize_approx") or 0)
-                    total_bytes = v_bytes + audio_bytes if v_bytes > 0 else 0
-                    size_str = format_bytes(total_bytes)
-
-                    # 格式化友好的画质标签
-                    max_dim = max(w, h)
-                    min_dim = min(w, h)
-                    if max_dim >= 1920 or min_dim >= 1080:
-                        q_name = "1080P 高清"
-                    elif max_dim >= 1280 or min_dim >= 720:
-                        q_name = "720P 高清"
-                    elif max_dim >= 852 or min_dim >= 480:
-                        q_name = "480P 清晰"
-                    else:
-                        q_name = "360P 流畅"
-
-                    label_text = f"{q_name} ({w}x{h})"
-                    if size_str:
-                        label_text += f" ~ {size_str}"
-
-                    quality_options.append(QualityOption(
-                        id=f.get("format_id", res_key),
-                        label=label_text,
-                        video_url=f.get("url", ""),
-                        audio_url=audio_url,
-                        filesize_bytes=total_bytes,
-                        filesize_str=size_str,
-                        width=w,
-                        height=h,
-                        codec="H.264" if is_avc else f.get("vcodec", "H.264")
-                    ))
-
-                # 默认最高清晰度
-                top_option = quality_options[0] if quality_options else None
-                top_v_url = top_option.video_url if top_option else video_formats[-1].get("url", "")
-                top_ratio = top_option.label.split("(")[0].strip() if top_option else "1080P 高清"
-
-                title = ytdl_info.get("title") or f"bilibili_{bvid}"
-                description = ytdl_info.get("description", "")
-                full_title = f"{title}\n{description}".strip() if description and description != title else title
-                cover = ytdl_info.get("thumbnail") or ""
-                uploader = ytdl_info.get("uploader") or "哔哩哔哩UP主"
-                uploader_id = str(ytdl_info.get("uploader_id") or "")
-                
-                duration = int(ytdl_info.get("duration") or 0)
-                view_count = int(ytdl_info.get("view_count") or 0)
-                like_count = int(ytdl_info.get("like_count") or 0)
-                comment_count = int(ytdl_info.get("comment_count") or 0)
-
-                return MediaResponse(
-                    success=True,
-                    platform="bilibili",
-                    platform_name="哔哩哔哩",
-                    type="video",
-                    id=bvid,
-                    title=full_title,
-                    cover=cover,
-                    author=AuthorInfo(
-                        nickname=uploader,
-                        avatar=up_avatar or f"https://ui-avatars.com/api/?name={uploader}&background=fb7299&color=fff",
-                        unique_id=uploader_id,
-                    ),
-                    statistics=StatisticsInfo(
-                        digg_count=like_count,
-                        comment_count=comment_count,
-                        play_count=view_count,
-                    ),
-                    music=MusicInfo(
-                        title=title,
-                        author=uploader,
-                        url=audio_url,
-                        cover=cover,
-                    ),
-                    video=VideoInfo(
-                        no_watermark_url=top_v_url,
-                        watermark_url=top_v_url,
-                        audio_url=audio_url,
-                        ratio=top_ratio,
-                        width=top_option.width if top_option else 1920,
-                        height=top_option.height if top_option else 1080,
-                        duration=duration,
-                        qualities=quality_options,
-                    ),
-                )
-
-        # 方案二：回退到官方 View 与 PlayURL 接口
-        async with httpx.AsyncClient(headers=self.headers, timeout=self.timeout) as client:
-            view_param = f"bvid={bvid}" if bvid.startswith("BV") else f"aid={bvid.lower().replace('av', '')}"
-            view_api = f"https://api.bilibili.com/x/web-interface/view?{view_param}"
-
+        view_data = {}
+        async with httpx.AsyncClient(headers=custom_headers, timeout=self.timeout) as client:
             try:
                 view_resp = await client.get(view_api)
                 view_json = view_resp.json()
+                if view_json.get("code") == 0:
+                    view_data = view_json.get("data", {})
+                else:
+                    return MediaResponse(
+                        success=False,
+                        platform="bilibili",
+                        platform_name="哔哩哔哩",
+                        type="video",
+                        id=bvid,
+                        title="",
+                        error=view_json.get("message", "获取 B站 视频详情失败"),
+                    )
             except Exception as e:
                 return MediaResponse(
                     success=False,
@@ -328,63 +206,131 @@ class BilibiliExtractor(BaseExtractor):
                     error=f"获取 B站 视频详情异常: {str(e)}",
                 )
 
-            if view_json.get("code") != 0:
-                return MediaResponse(
-                    success=False,
-                    platform="bilibili",
-                    platform_name="哔哩哔哩",
-                    type="video",
-                    id=bvid,
-                    title="",
-                    error=view_json.get("message", "获取 B站 视频详情失败"),
-                )
+        main_title = view_data.get("title", f"bilibili_{bvid}")
+        desc = view_data.get("desc", "")
+        main_cover = view_data.get("pic", "")
+        default_cid = view_data.get("cid")
+        pubdate = view_data.get("pubdate", 0)
+        total_duration = view_data.get("duration", 0)
 
-            data = view_json.get("data", {})
-            title = data.get("title", f"bilibili_{bvid}")
-            desc = data.get("desc", "")
-            full_title = f"{title}\n{desc}".strip() if desc and desc != title else title
-            cover = data.get("pic", "")
-            cid = data.get("cid")
-            duration = data.get("duration", 0)
-            pubdate = data.get("pubdate", 0)
+        owner = view_data.get("owner", {})
+        author_info = AuthorInfo(
+            nickname=owner.get("name", "哔哩哔哩UP主"),
+            avatar=owner.get("face", ""),
+            unique_id=str(owner.get("mid", "")),
+            signature="",
+        )
 
-            owner = data.get("owner", {})
-            author_info = AuthorInfo(
-                nickname=owner.get("name", "哔哩哔哩UP主"),
-                avatar=owner.get("face", "") or up_avatar,
-                unique_id=str(owner.get("mid", "")),
-                signature="",
-            )
+        stat = view_data.get("stat", {})
+        statistics_info = StatisticsInfo(
+            digg_count=int(stat.get("like", 0) or 0),
+            comment_count=int(stat.get("reply", 0) or 0),
+            share_count=int(stat.get("share", 0) or 0),
+            play_count=int(stat.get("view", 0) or 0),
+            danmaku_count=int(stat.get("danmaku", 0) or 0),
+            coin_count=int(stat.get("coin", 0) or 0),
+        )
 
-            stat = data.get("stat", {})
-            statistics_info = StatisticsInfo(
-                digg_count=int(stat.get("like", 0) or 0),
-                comment_count=int(stat.get("reply", 0) or 0),
-                share_count=int(stat.get("share", 0) or 0),
-                play_count=int(stat.get("view", 0) or 0),
-                danmaku_count=int(stat.get("danmaku", 0) or 0),
-                coin_count=int(stat.get("coin", 0) or 0),
-            )
+        # 2. 提取分P列表 (pages)
+        raw_pages = view_data.get("pages", [])
+        episodes: List[VideoEpisode] = []
+        target_cid = default_cid
+        target_page_title = ""
+        target_duration = total_duration
+        target_cover = main_cover
 
-            play_api = f"https://api.bilibili.com/x/player/playurl?{view_param}&cid={cid}&fnval=4048&fourk=1"
-            video_url = ""
-            audio_url = ""
-            ratio = "720P 高清"
-            quality_options: List[QualityOption] = []
+        if raw_pages and isinstance(raw_pages, list):
+            for p_item in raw_pages:
+                p_num = int(p_item.get("page", 1))
+                p_cid = p_item.get("cid")
+                p_part = p_item.get("part") or f"第{p_num}集"
+                p_dur = int(p_item.get("duration", 0) or 0)
+                p_first_frame = p_item.get("first_frame") or main_cover
 
+                episodes.append(VideoEpisode(
+                    id=str(p_cid or p_num),
+                    title=p_part,
+                    page=p_num,
+                    duration=p_dur,
+                    cover=p_first_frame,
+                    cid=p_cid,
+                    bvid=bvid,
+                    share_url=f"https://www.bilibili.com/video/{bvid}?p={p_num}",
+                ))
+
+            # 匹配当前选中的分P
+            matched_page = next((p for p in raw_pages if int(p.get("page", 1)) == selected_page), None)
+            if not matched_page and raw_pages:
+                matched_page = raw_pages[0]
+                selected_page = 1
+
+            if matched_page:
+                target_cid = matched_page.get("cid")
+                target_page_title = matched_page.get("part", "")
+                target_duration = int(matched_page.get("duration", 0) or 0)
+                if matched_page.get("first_frame"):
+                    target_cover = matched_page.get("first_frame")
+
+        # 3. 提取 UGC 视频合集 / 剧集 (ugc_season)
+        ugc_season = view_data.get("ugc_season")
+        season_title = None
+        if ugc_season and isinstance(ugc_season, dict):
+            season_title = ugc_season.get("title")
+            # 若单视频只有1个分P，但属于多视频组成的合集，则展开合集视频列表
+            if len(episodes) <= 1:
+                season_episodes = []
+                sections = ugc_season.get("sections", [])
+                ep_idx = 1
+                for sec in sections:
+                    for ep in sec.get("episodes", []):
+                        ep_bvid = ep.get("bvid") or bvid
+                        ep_cid = ep.get("cid")
+                        ep_t = ep.get("title") or (ep.get("arc", {}).get("title") if ep.get("arc") else f"第{ep_idx}集")
+                        arc_info = ep.get("arc", {}) or {}
+                        ep_d = int(arc_info.get("duration", 0) or (ep.get("page", {}).get("duration", 0) if ep.get("page") else 0))
+                        ep_pic = arc_info.get("pic") or main_cover
+                        season_episodes.append(VideoEpisode(
+                            id=str(ep_cid or ep_bvid),
+                            title=ep_t,
+                            page=ep_idx,
+                            duration=ep_d,
+                            cover=ep_pic,
+                            cid=ep_cid,
+                            bvid=ep_bvid,
+                            share_url=f"https://www.bilibili.com/video/{ep_bvid}",
+                        ))
+                        ep_idx += 1
+                if len(season_episodes) > 1:
+                    episodes = season_episodes
+
+        # 组装展示标题：若有多分集，附带分P标签
+        if len(episodes) > 1 and target_page_title and target_page_title != main_title:
+            full_title = f"{main_title} (P{selected_page}: {target_page_title})"
+        else:
+            full_title = f"{main_title}\n{desc}".strip() if desc and desc != main_title else main_title
+
+        # 4. 获取当前分P的 DASH 播放流与多画质
+        video_url = ""
+        audio_url = ""
+        ratio = "720P 高清"
+        quality_options: List[QualityOption] = []
+
+        # 优先使用官方 PlayURL 提取对应 target_cid 的 DASH 流
+        async with httpx.AsyncClient(headers=custom_headers, timeout=self.timeout) as client:
+            play_api = f"https://api.bilibili.com/x/player/playurl?{view_param}&cid={target_cid}&fnval=4048&fourk=1"
             try:
                 play_resp = await client.get(play_api)
                 if play_resp.status_code == 200:
                     play_data = play_resp.json().get("data", {})
                     dash = play_data.get("dash", {})
                     if dash:
-                        # 1. 提取最佳音频轨
+                        # 最佳音频流
                         audio_streams = dash.get("audio", []) or dash.get("dolby", {}).get("audio", [])
                         if audio_streams:
                             top_a = audio_streams[0]
                             audio_url = top_a.get("baseUrl") or (top_a.get("backupUrl", [""])[0] if top_a.get("backupUrl") else "")
 
-                        # 2. 遍历所有可用视频流
+                        # 所有视频清晰度
                         video_streams = dash.get("video", [])
                         seen_qids = set()
                         for v in video_streams:
@@ -424,32 +370,96 @@ class BilibiliExtractor(BaseExtractor):
             except Exception:
                 pass
 
-            return MediaResponse(
-                success=True,
-                platform="bilibili",
-                platform_name="哔哩哔哩",
-                type="video",
-                id=bvid,
+        # 方案补充：若官方未获取到画质且 yt-dlp 可用，尝试 yt-dlp 补充
+        if not video_url:
+            loop = asyncio.get_event_loop()
+            target_p_url = f"https://www.bilibili.com/video/{bvid}?p={selected_page}"
+            ytdl_info = await loop.run_in_executor(None, self._extract_via_ytdlp, target_p_url, sessdata)
+            if ytdl_info:
+                formats = ytdl_info.get("formats", [])
+                video_formats = [f for f in formats if f.get("vcodec") != "none" and f.get("url")]
+                audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")]
+
+                if video_formats:
+                    top_a = audio_formats[-1] if audio_formats else None
+                    audio_url = top_a.get("url", "") if top_a else ""
+                    audio_bytes = int(top_a.get("filesize") or top_a.get("filesize_approx") or 0) if top_a else 0
+
+                    seen_res = set()
+                    for f in reversed(video_formats):
+                        w = f.get("width") or 0
+                        h = f.get("height") or 0
+                        res_key = f"{w}x{h}" if w and h else f.get("resolution", "unknown")
+                        is_avc = "avc" in f.get("vcodec", "").lower() or "h264" in f.get("vcodec", "").lower()
+
+                        if res_key in seen_res:
+                            continue
+                        seen_res.add(res_key)
+
+                        v_bytes = int(f.get("filesize") or f.get("filesize_approx") or 0)
+                        total_bytes = v_bytes + audio_bytes if v_bytes > 0 else 0
+                        size_str = format_bytes(total_bytes)
+
+                        max_dim = max(w, h)
+                        min_dim = min(w, h)
+                        if max_dim >= 1920 or min_dim >= 1080:
+                            q_name = "1080P 高清"
+                        elif max_dim >= 1280 or min_dim >= 720:
+                            q_name = "720P 高清"
+                        elif max_dim >= 852 or min_dim >= 480:
+                            q_name = "480P 清晰"
+                        else:
+                            q_name = "360P 流畅"
+
+                        label_text = f"{q_name} ({w}x{h})"
+                        if size_str:
+                            label_text += f" ~ {size_str}"
+
+                        quality_options.append(QualityOption(
+                            id=f.get("format_id", res_key),
+                            label=label_text,
+                            video_url=f.get("url", ""),
+                            audio_url=audio_url,
+                            filesize_bytes=total_bytes,
+                            filesize_str=size_str,
+                            width=w,
+                            height=h,
+                            codec="H.264" if is_avc else f.get("vcodec", "H.264")
+                        ))
+
+                    if quality_options:
+                        video_url = quality_options[0].video_url
+                        ratio = quality_options[0].label.split("(")[0].strip()
+
+        return MediaResponse(
+            success=True,
+            platform="bilibili",
+            platform_name="哔哩哔哩",
+            type="video",
+            id=f"{bvid}_p{selected_page}" if len(episodes) > 1 else bvid,
+            title=full_title,
+            cover=target_cover,
+            author=author_info,
+            statistics=statistics_info,
+            music=MusicInfo(
                 title=full_title,
-                cover=cover,
-                author=author_info,
-                statistics=statistics_info,
-                music=MusicInfo(
-                    title=title,
-                    author=author_info.nickname,
-                    url=audio_url,
-                    cover=cover,
-                ),
-                video=VideoInfo(
-                    no_watermark_url=video_url,
-                    watermark_url=video_url,
-                    audio_url=audio_url,
-                    ratio=ratio,
-                    duration=duration,
-                    qualities=quality_options,
-                ),
-                create_time=pubdate,
-            )
+                author=author_info.nickname,
+                url=audio_url,
+                cover=target_cover,
+            ),
+            video=VideoInfo(
+                no_watermark_url=video_url,
+                watermark_url=video_url,
+                audio_url=audio_url,
+                ratio=ratio,
+                duration=target_duration,
+                qualities=quality_options,
+            ),
+            episodes=episodes,
+            current_page=selected_page,
+            season_title=season_title,
+            create_time=pubdate,
+        )
 
     async def get_mid(self, url: str) -> Optional[str]:
         """从主页链接或短链中提取 UP主的 mid (UID)"""

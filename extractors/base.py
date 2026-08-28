@@ -33,6 +33,16 @@ class QualityOption(BaseModel):
     height: int = 0
     codec: str = "H.264"
 
+class VideoEpisode(BaseModel):
+    id: str = Field(description="分P/集ID，如 cid 或 bvid")
+    title: str = Field(description="分P/集标题")
+    page: int = Field(default=1, description="分P序号/集数")
+    duration: int = Field(default=0, description="时长(秒)")
+    cover: str = Field(default="", description="分P/集封面")
+    cid: Optional[int] = Field(default=None, description="B站特有 cid")
+    bvid: Optional[str] = Field(default=None, description="B站特有 bvid (合集场景)")
+    share_url: str = Field(default="", description="该分集独立跳转链接")
+
 class VideoInfo(BaseModel):
     no_watermark_url: str = ""
     watermark_url: str = ""
@@ -55,6 +65,9 @@ class MediaResponse(BaseModel):
     statistics: StatisticsInfo = Field(default_factory=StatisticsInfo)
     music: MusicInfo = Field(default_factory=MusicInfo)
     video: Optional[VideoInfo] = None
+    episodes: List[VideoEpisode] = Field(default_factory=list, description="多P分集或视频选集列表")
+    current_page: int = Field(default=1, description="当前选中的分P序号")
+    season_title: Optional[str] = Field(default=None, description="若属于合集，合集名称")
     images: List[str] = Field(default_factory=list, description="无水印高清原图列表")
     image_count: int = 0
     create_time: int = 0

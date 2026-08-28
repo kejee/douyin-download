@@ -402,9 +402,11 @@ function renderResult(data) {
 
         const durStr = video.duration ? formatDuration(video.duration) : "";
 
+        const isLandscape = (platform === 'bilibili' || platform === 'youtube') || (video && video.width && video.height && video.width > video.height) || (video && video.ratio && !video.ratio.toLowerCase().includes('portrait'));
+
         // 视频播放器
         mediaHtml = `
-            <div class="media-preview-container">
+            <div class="media-preview-container ${isLandscape ? 'is-landscape' : ''}">
                 <div class="stream-badge-group">
                     ${isBiliStream ? `
                     <div class="stream-live-badge">
@@ -423,6 +425,7 @@ function renderResult(data) {
                     playsinline
                     preload="metadata"
                     referrerpolicy="no-referrer"
+                    onloadedmetadata="onVideoMetadataLoaded(this)"
                 ></video>
             </div>
         `;
@@ -563,8 +566,65 @@ function renderResult(data) {
         `;
     }
 
+    // 选集 / 分P合集面板渲染
+    let episodesHtml = "";
+    if (data.episodes && data.episodes.length > 1) {
+        const curP = data.current_page || 1;
+        const epItems = data.episodes.map(ep => {
+            const isActive = ep.page === curP;
+            const durStr = ep.duration ? formatDuration(ep.duration) : "";
+            const safeTitle = (ep.title || `第${ep.page}集`).replace(/"/g, '&quot;');
+            return `
+                <div class="episode-item ${isActive ? 'active' : ''}" 
+                     data-page="${ep.page}" 
+                     data-title="${safeTitle}" 
+                     onclick="switchEpisode('${ep.share_url || ''}', ${ep.page})" 
+                     title="点击播放 P${ep.page}: ${safeTitle}">
+                    <div class="episode-info">
+                        <div class="episode-main">
+                            <span class="episode-tag">P${ep.page}</span>
+                            <span class="episode-title">${ep.title || `第${ep.page}集`}</span>
+                        </div>
+                        <div class="episode-meta">
+                            ${durStr ? `<span><i class="fa-regular fa-clock"></i> ${durStr}</span>` : ''}
+                            ${isActive ? `<span style="color: #818cf8; font-weight: 600;"><i class="fa-solid fa-play"></i> 播放中</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="episode-actions" onclick="event.stopPropagation()">
+                        <button class="btn-ep-action" onclick="copyToClipboard('${ep.share_url}', 'P${ep.page} 分集链接')" title="复制此集链接">
+                            <i class="fa-regular fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join("");
+
+        episodesHtml = `
+            <div class="episodes-section" id="episodesSection">
+                <div class="episodes-header-row">
+                    <div class="episodes-title-group">
+                        <span class="episodes-title"><i class="fa-solid fa-layer-group text-gradient"></i> 视频选集 / 分P合集</span>
+                        <span class="episodes-count-badge">共 ${data.episodes.length} 集</span>
+                        ${data.season_title ? `<span class="episodes-season-badge" title="${data.season_title}">合集: ${data.season_title}</span>` : ''}
+                    </div>
+                    <div class="episodes-tools">
+                        <input type="text" class="episodes-search-input" id="episodeSearchInput" placeholder="🔍 搜索分集/序号..." oninput="onEpisodeSearch(this.value)">
+                        <button class="btn-episodes-tool" onclick="copyAllEpisodesLinks()" title="一键复制全部分P链接">
+                            <i class="fa-regular fa-copy"></i> 复制全部链接
+                        </button>
+                    </div>
+                </div>
+                <div class="episodes-grid" id="episodesGrid">
+                    ${epItems}
+                </div>
+            </div>
+        `;
+    }
+
+    const isLandscape = (platform === 'bilibili' || platform === 'youtube') || (video && video.width && video.height && video.width > video.height) || (video && video.ratio && !video.ratio.toLowerCase().includes('portrait'));
+
     resultContainer.innerHTML = `
-        <div class="result-layout ${type === 'images' ? 'is-images-layout' : ''}">
+        <div class="result-layout ${type === 'images' ? 'is-images-layout' : ''} ${isLandscape ? 'is-landscape-layout' : ''}">
             <div class="media-column">
                 ${mediaHtml}
             </div>
@@ -618,11 +678,95 @@ function renderResult(data) {
 
                 ${actionsHtml}
             </div>
+            ${episodesHtml}
         </div>
     `;
 
     resultContainer.style.display = "block";
     resultContainer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// 切换选集分P
+async function switchEpisode(shareUrl, pageNum) {
+    if (!shareUrl) return;
+    showToast(`正在切换至 P${pageNum}...`, "info");
+
+    try {
+        const sessdata = getBiliSessdata();
+        const response = await fetch("/api/parse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: shareUrl, sessdata: sessdata || null }),
+        });
+
+        const data = await response.json();
+        if (response.ok && data.success) {
+            renderResult(data);
+            showToast(`已成功切换至 P${pageNum}`, "success");
+            // 自动开始播放
+            setTimeout(() => {
+                const player = document.getElementById("mainVideoPlayer");
+                if (player) {
+                    player.play().catch(() => {});
+                }
+            }, 300);
+        } else {
+            showToast(data.detail || data.error || "分集切换失败", "error");
+        }
+    } catch (err) {
+        showToast("网络请求异常: " + err.message, "error");
+    }
+}
+
+// 视频元数据加载完成后自适应比例
+function onVideoMetadataLoaded(videoEl) {
+    if (!videoEl) return;
+    const container = videoEl.closest('.media-preview-container');
+    const layout = videoEl.closest('.result-layout');
+    if (!container) return;
+    
+    // 如果视频实际宽度 >= 高度 (横屏 16:9 / 4:3)
+    if (videoEl.videoWidth && videoEl.videoHeight && videoEl.videoWidth >= videoEl.videoHeight) {
+        container.classList.add('is-landscape');
+        if (layout) layout.classList.add('is-landscape-layout');
+    }
+}
+
+// 选集实时搜索过滤
+function onEpisodeSearch(keyword) {
+    const grid = document.getElementById("episodesGrid");
+    if (!grid) return;
+    const items = grid.querySelectorAll(".episode-item");
+    const term = (keyword || "").trim().toLowerCase();
+
+    items.forEach(item => {
+        const title = (item.getAttribute("data-title") || "").toLowerCase();
+        const page = (item.getAttribute("data-page") || "").toLowerCase();
+        if (!term || title.includes(term) || page === term || `p${page}` === term) {
+            item.style.display = "flex";
+        } else {
+            item.style.display = "none";
+        }
+    });
+}
+
+// 一键复制全部分P链接
+function copyAllEpisodesLinks() {
+    if (!window.currentMediaData || !window.currentMediaData.episodes) return;
+    const episodes = window.currentMediaData.episodes;
+    const mainTitle = window.currentMediaData.title || "视频合集";
+
+    const textList = [
+        `# ${mainTitle}`,
+        `总计 ${episodes.length} 集：\n`,
+    ];
+
+    episodes.forEach(ep => {
+        textList.push(`P${ep.page} ${ep.title}：${ep.share_url}`);
+    });
+
+    const fullText = textList.join("\n");
+    copyToClipboard(fullText, `全部 ${episodes.length} 个分集链接`);
 }
 
 // 批量下载图集

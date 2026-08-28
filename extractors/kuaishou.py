@@ -166,7 +166,8 @@ class KuaishouExtractor(BaseExtractor):
             # 视频
             main_mv_urls = photo_data.get("mainMvUrls", [])
             video_url = main_mv_urls[0].get("url") if (main_mv_urls and isinstance(main_mv_urls[0], dict)) else photo_data.get("photoUrl", "")
-            duration = int(photo_data.get("duration", 0) or 0)
+            duration_raw = int(photo_data.get("duration", 0) or 0)
+            duration = int(duration_raw / 1000) if duration_raw > 1000 else duration_raw
             width = int(photo_data.get("width", 0) or 0)
             height = int(photo_data.get("height", 0) or 0)
 

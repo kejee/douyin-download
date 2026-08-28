@@ -95,6 +95,8 @@ class UserPostItem(BaseModel):
     download_url: str = Field(default="", description="默认高清下载链接/视频直链")
     images: List[str] = Field(default_factory=list, description="若为图集则包含所有原图链接")
     share_url: str = Field(default="", description="作品原网页链接")
+    is_season: bool = Field(default=False, description="是否为合集/多P视频")
+    season_label: str = Field(default="", description="合集标签，如 共1000集")
 
 class UserProfileResponse(BaseModel):
     success: bool = True

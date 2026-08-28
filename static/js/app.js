@@ -566,9 +566,15 @@ function renderResult(data) {
         `;
     }
 
-    // 选集 / 分P合集面板渲染
+    // 继承保护：若本次单分P解析返回的 episodes 为空或只有1集，但之前已存在多P列表，则完整继承保留
+    if ((!data.episodes || data.episodes.length <= 1) && window.currentMediaData && window.currentMediaData.episodes && window.currentMediaData.episodes.length > 1) {
+        data.episodes = window.currentMediaData.episodes;
+        data.season_title = data.season_title || window.currentMediaData.season_title;
+    }
+
+    // 选集 / 分P合集面板渲染 (只要存在分P列表或属于合集就 100% 渲染展示)
     let episodesHtml = "";
-    if (data.episodes && data.episodes.length > 1) {
+    if (data.episodes && data.episodes.length > 0 && (data.episodes.length > 1 || Boolean(data.season_title))) {
         const curP = data.current_page || 1;
         const epItems = data.episodes.map(ep => {
             const isActive = ep.page === curP;
@@ -594,10 +600,15 @@ function renderResult(data) {
                         <button class="btn-ep-action" onclick="copyToClipboard('${ep.share_url}', 'P${ep.page} 分集链接')" title="复制此集链接">
                             <i class="fa-regular fa-copy"></i>
                         </button>
+                        <button class="btn-ep-action btn-ep-download" onclick="downloadSingleEpisode('${ep.share_url}', ${ep.page}, '${safeTitle}')" title="下载本集 (MP4)">
+                            <i class="fa-solid fa-download"></i>
+                        </button>
                     </div>
                 </div>
             `;
         }).join("");
+
+        const displaySeasonTitle = data.season_title || (data.episodes && data.episodes.length > 1 ? data.title : "");
 
         episodesHtml = `
             <div class="episodes-section" id="episodesSection">
@@ -605,15 +616,29 @@ function renderResult(data) {
                     <div class="episodes-title-group">
                         <span class="episodes-title"><i class="fa-solid fa-layer-group text-gradient"></i> 视频选集 / 分P合集</span>
                         <span class="episodes-count-badge">共 ${data.episodes.length} 集</span>
-                        ${data.season_title ? `<span class="episodes-season-badge" title="${data.season_title}">合集: ${data.season_title}</span>` : ''}
+                        ${displaySeasonTitle ? `<span class="episodes-season-badge" title="${displaySeasonTitle}"><i class="fa-solid fa-layer-group"></i> ${displaySeasonTitle}</span>` : ''}
                     </div>
                     <div class="episodes-tools">
-                        <input type="text" class="episodes-search-input" id="episodeSearchInput" placeholder="🔍 搜索分集/序号..." oninput="onEpisodeSearch(this.value)">
+                        <input type="text" class="episodes-search-input" name="search_${Date.now()}" id="episodeSearchInput" placeholder="🔍 搜索分集/序号..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="" oninput="onEpisodeSearch(this.value)">
+                        <button class="btn-episodes-tool" onclick="refreshCurrentEpisodes()" title="重新检测并刷新分P列表">
+                            <i class="fa-solid fa-arrows-rotate"></i> 刷新分P
+                        </button>
                         <button class="btn-episodes-tool" onclick="copyAllEpisodesLinks()" title="一键复制全部分P链接">
                             <i class="fa-regular fa-copy"></i> 复制全部链接
                         </button>
+                        <button class="btn-episodes-tool btn-episodes-dl" onclick="downloadAllEpisodes('folder')" title="下载全部并保存到本地文件夹" style="background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8;">
+                            <i class="fa-solid fa-folder-arrow-down"></i> 保存到文件夹
+                        </button>
+                        <button class="btn-episodes-tool" onclick="downloadAllEpisodes('direct')" title="依次触发全部选集下载">
+                            <i class="fa-solid fa-download"></i> 批量下载
+                        </button>
                     </div>
                 </div>
+                ${displaySeasonTitle ? `
+                <div class="episodes-season-info-bar">
+                    <span class="season-info-tag"><i class="fa-solid fa-folder-open"></i> 所属合集</span>
+                    <span class="season-info-title" title="${displaySeasonTitle}">${displaySeasonTitle}</span>
+                </div>` : ''}
                 <div class="episodes-grid" id="episodesGrid">
                     ${epItems}
                 </div>
@@ -683,6 +708,9 @@ function renderResult(data) {
     `;
 
     resultContainer.style.display = "block";
+    const searchInput = document.getElementById("episodeSearchInput");
+    if (searchInput) searchInput.value = "";
+    onEpisodeSearch("");
     resultContainer.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
@@ -750,6 +778,42 @@ function onEpisodeSearch(keyword) {
     });
 }
 
+// 下载单个指定分P集
+async function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
+    if (!shareUrl) return;
+    const seasonTitle = (window.currentMediaData && (window.currentMediaData.season_title || window.currentMediaData.title)) || "合集视频";
+    const safeSeasonTitle = seasonTitle.replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30);
+    const pageStr = String(pageNum).padStart(2, '0');
+    const safeEpTitle = `${safeSeasonTitle}_P${pageStr}_${(epTitle || `第${pageNum}集`).replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30)}.mp4`;
+
+    showToast(`正在提取 P${pageNum} 高清下载通道...`, "info");
+
+    try {
+        const sessdata = getBiliSessdata();
+        const parseResp = await fetch("/api/parse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: shareUrl, sessdata: sessdata || null }),
+        });
+        const parseData = await parseResp.json();
+
+        if (parseResp.ok && parseData.success && parseData.video) {
+            const vUrl = parseData.video.no_watermark_url;
+            const aUrl = parseData.video.audio_url;
+            if (aUrl) {
+                triggerMuxDownload(vUrl, aUrl, safeEpTitle);
+            } else {
+                triggerDownload(vUrl, safeEpTitle);
+            }
+            showToast(`已成功发起 P${pageNum} 下载任务！`, "success");
+        } else {
+            showToast(parseData.detail || parseData.error || `P${pageNum} 提取下载链接失败`, "error");
+        }
+    } catch (err) {
+        showToast("网络请求异常: " + err.message, "error");
+    }
+}
+
 // 一键复制全部分P链接
 function copyAllEpisodesLinks() {
     if (!window.currentMediaData || !window.currentMediaData.episodes) return;
@@ -767,6 +831,367 @@ function copyAllEpisodesLinks() {
 
     const fullText = textList.join("\n");
     copyToClipboard(fullText, `全部 ${episodes.length} 个分集链接`);
+}
+
+// ==========================================================================
+// 批量下载任务队列与任务管理器 (Task Manager)
+// ==========================================================================
+window.taskQueue = [];
+window.maxConcurrentTasks = 2; // 最大并发下载数
+window.isTaskQueuePaused = false;
+window.taskTargetFolder = null; // 本地文件夹 Handle
+
+// 切换任务管理器显示/隐藏/最小化
+function toggleTaskManager(show = true) {
+    const drawer = document.getElementById("taskManagerDrawer");
+    const bubble = document.getElementById("taskManagerBubble");
+    if (!drawer || !bubble) return;
+
+    if (show) {
+        drawer.style.display = "flex";
+        bubble.style.display = "none";
+        renderTaskManagerUI();
+    } else {
+        drawer.style.display = "none";
+        // 如果还有未完成的任务，展示最小化气泡
+        const activeCount = window.taskQueue.filter(t => t.status === 'running' || t.status === 'waiting').length;
+        if (activeCount > 0) {
+            bubble.style.display = "flex";
+            const successCount = window.taskQueue.filter(t => t.status === 'success').length;
+            const bubbleText = document.getElementById("tmBubbleText");
+            if (bubbleText) bubbleText.textContent = `下载中 (${successCount}/${window.taskQueue.length})`;
+        } else {
+            bubble.style.display = "none";
+        }
+    }
+}
+
+// 渲染任务管理器界面
+function renderTaskManagerUI() {
+    const listEl = document.getElementById("taskManagerList");
+    if (!listEl) return;
+
+    const total = window.taskQueue.length;
+    const running = window.taskQueue.filter(t => t.status === 'running').length;
+    const waiting = window.taskQueue.filter(t => t.status === 'waiting').length;
+    const paused = window.taskQueue.filter(t => t.status === 'paused').length;
+    const success = window.taskQueue.filter(t => t.status === 'success').length;
+    const error = window.taskQueue.filter(t => t.status === 'error').length;
+
+    const totalBadge = document.getElementById("taskTotalBadge");
+    if (totalBadge) totalBadge.textContent = `${total} 项`;
+    const rEl = document.getElementById("statRunning"); if (rEl) rEl.textContent = running;
+    const wEl = document.getElementById("statWaiting"); if (wEl) wEl.textContent = waiting;
+    const pEl = document.getElementById("statPaused"); if (pEl) pEl.textContent = paused;
+    const sEl = document.getElementById("statSuccess"); if (sEl) sEl.textContent = success;
+    const eEl = document.getElementById("statError"); if (eEl) eEl.textContent = error;
+
+    // 总进度条
+    const overallBar = document.getElementById("overallProgressBar");
+    if (overallBar) {
+        const percent = total > 0 ? Math.round((success / total) * 100) : 0;
+        overallBar.style.width = `${percent}%`;
+    }
+
+    // 最小化气泡文字同步
+    const bubbleText = document.getElementById("tmBubbleText");
+    if (bubbleText) bubbleText.textContent = `下载管理 (${success}/${total})`;
+
+    if (total === 0) {
+        listEl.innerHTML = `
+            <div style="text-align: center; color: var(--text-dim); padding: 30px 10px; font-size: 12px;">
+                <i class="fa-solid fa-list-check" style="font-size: 24px; margin-bottom: 8px; color: var(--text-muted);"></i>
+                <div>暂无正在进行的批量任务</div>
+            </div>
+        `;
+        return;
+    }
+
+    listEl.innerHTML = window.taskQueue.map(t => {
+        let statusLabel = "等待中";
+        let statusClass = "status-waiting";
+        if (t.status === "running") { statusLabel = `下载中 ${t.progress}%`; statusClass = "status-running"; }
+        else if (t.status === "paused") { statusLabel = "已暂停"; statusClass = "status-paused"; }
+        else if (t.status === "success") { statusLabel = "已完成"; statusClass = "status-success"; }
+        else if (t.status === "error") { statusLabel = "失败"; statusClass = "status-error"; }
+
+        return `
+            <div class="task-item-card is-${t.status}" id="task_card_${t.id}">
+                <div class="task-item-main">
+                    <span class="task-item-title" title="${t.title}">${t.title}</span>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="task-status-badge ${statusClass}">${statusLabel}</span>
+                        <div class="task-item-actions">
+                            ${t.status === 'running' ? `
+                            <button class="btn-task-action" onclick="pauseTask('${t.id}')" title="暂停此任务">
+                                <i class="fa-solid fa-pause"></i>
+                            </button>` : ''}
+                            ${t.status === 'paused' || t.status === 'waiting' ? `
+                            <button class="btn-task-action" onclick="resumeTask('${t.id}')" title="开始/继续此任务">
+                                <i class="fa-solid fa-play"></i>
+                            </button>` : ''}
+                            ${t.status === 'error' ? `
+                            <button class="btn-task-action" onclick="retryTask('${t.id}')" title="重试此任务">
+                                <i class="fa-solid fa-arrows-rotate"></i>
+                            </button>` : ''}
+                        </div>
+                    </div>
+                </div>
+                <div class="task-item-progress-track">
+                    <div class="task-item-progress-bar" style="width: ${t.progress || 0}%;"></div>
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+
+// 调度任务队列并发
+function scheduleTaskQueue() {
+    if (window.isTaskQueuePaused) return;
+
+    const runningTasks = window.taskQueue.filter(t => t.status === 'running');
+    if (runningTasks.length >= window.maxConcurrentTasks) return;
+
+    const availableSlots = window.maxConcurrentTasks - runningTasks.length;
+    const waitingTasks = window.taskQueue.filter(t => t.status === 'waiting').slice(0, availableSlots);
+
+    waitingTasks.forEach(task => {
+        runSingleTask(task);
+    });
+}
+
+// 执行单个下载任务
+async function runSingleTask(task) {
+    if (!task || task.status !== 'waiting') return;
+    task.status = 'running';
+    task.progress = 10;
+    renderTaskManagerUI();
+
+    const abortCtrl = new AbortController();
+    task.abortCtrl = abortCtrl;
+
+    try {
+        const sessdata = getBiliSessdata();
+        const parseResp = await fetch("/api/parse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: task.share_url, sessdata: sessdata || null }),
+            signal: abortCtrl.signal,
+        });
+        const parseData = await parseResp.json();
+        
+        if (!parseResp.ok || !parseData.success || !parseData.video) {
+            throw new Error(parseData.detail || parseData.error || "提取视频流失败");
+        }
+
+        task.progress = 35;
+        renderTaskManagerUI();
+
+        const vUrl = parseData.video.no_watermark_url;
+        const aUrl = parseData.video.audio_url;
+
+        // 如果是直接保存到电脑本地文件夹 (Chrome/Edge File System)
+        if (task.mode === 'folder' && window.taskTargetFolder) {
+            const streamUrl = aUrl 
+                ? `/api/stream/mux?video_url=${encodeURIComponent(vUrl)}&audio_url=${encodeURIComponent(aUrl)}&filename=${encodeURIComponent(task.filename)}`
+                : `/api/download?url=${encodeURIComponent(vUrl)}&filename=${encodeURIComponent(task.filename)}`;
+
+            const fileHandle = await window.taskTargetFolder.getFileHandle(task.filename, { create: true });
+            const writable = await fileHandle.createWritable();
+
+            const fileResp = await fetch(streamUrl, { signal: abortCtrl.signal });
+            if (!fileResp.ok) throw new Error("流式下载网络响应异常");
+
+            // 流式读取并更新进度
+            const contentLength = +fileResp.headers.get('Content-Length') || 0;
+            if (contentLength && fileResp.body) {
+                const reader = fileResp.body.getReader();
+                let received = 0;
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    await writable.write(value);
+                    received += value.length;
+                    task.progress = 35 + Math.round((received / contentLength) * 60);
+                    renderTaskManagerUI();
+                }
+                await writable.close();
+            } else {
+                await fileResp.body.pipeTo(writable);
+            }
+        } else {
+            // 普通浏览器多任务下载
+            if (aUrl) {
+                triggerMuxDownload(vUrl, aUrl, task.filename);
+            } else {
+                triggerDownload(vUrl, task.filename);
+            }
+        }
+
+        task.status = 'success';
+        task.progress = 100;
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            task.status = 'paused';
+        } else {
+            task.status = 'error';
+            task.errorMsg = err.message || "下载失败";
+        }
+    } finally {
+        task.abortCtrl = null;
+        renderTaskManagerUI();
+        // 继续调度队列中的下一个任务
+        scheduleTaskQueue();
+    }
+}
+
+// 单任务控制
+function pauseTask(taskId) {
+    const task = window.taskQueue.find(t => t.id === taskId);
+    if (!task) return;
+    if (task.status === 'running' && task.abortCtrl) {
+        task.abortCtrl.abort();
+    }
+    task.status = 'paused';
+    renderTaskManagerUI();
+    scheduleTaskQueue();
+}
+
+function resumeTask(taskId) {
+    const task = window.taskQueue.find(t => t.id === taskId);
+    if (!task) return;
+    task.status = 'waiting';
+    renderTaskManagerUI();
+    scheduleTaskQueue();
+}
+
+function retryTask(taskId) {
+    const task = window.taskQueue.find(t => t.id === taskId);
+    if (!task) return;
+    task.status = 'waiting';
+    task.progress = 0;
+    renderTaskManagerUI();
+    scheduleTaskQueue();
+}
+
+// 批量全局控制
+function pauseAllTasks() {
+    window.isTaskQueuePaused = true;
+    window.taskQueue.forEach(t => {
+        if (t.status === 'running' && t.abortCtrl) {
+            t.abortCtrl.abort();
+        }
+        if (t.status === 'running' || t.status === 'waiting') {
+            t.status = 'paused';
+        }
+    });
+    renderTaskManagerUI();
+    showToast("已暂停全部批量下载任务", "info");
+}
+
+function resumeAllTasks() {
+    window.isTaskQueuePaused = false;
+    window.taskQueue.forEach(t => {
+        if (t.status === 'paused') {
+            t.status = 'waiting';
+        }
+    });
+    renderTaskManagerUI();
+    scheduleTaskQueue();
+    showToast("已继续全部批量下载任务", "success");
+}
+
+function clearCompletedTasks() {
+    window.taskQueue = window.taskQueue.filter(t => t.status !== 'success');
+    renderTaskManagerUI();
+    showToast("已清空全部已完成任务", "info");
+}
+
+// 批量下载当前选集所有分集入口
+async function downloadAllEpisodes(mode = 'folder') {
+    if (!window.currentMediaData || !window.currentMediaData.episodes) return;
+    const episodes = window.currentMediaData.episodes;
+    const seasonTitle = window.currentMediaData.season_title || window.currentMediaData.title || "合集视频";
+    const safeSeasonTitle = seasonTitle.replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 40);
+
+    let targetFolderHandle = null;
+
+    if (mode === 'folder') {
+        if (window.showDirectoryPicker) {
+            try {
+                showToast("请在弹窗中选择用于保存合集的电脑本地文件夹...", "info");
+                const parentDir = await window.showDirectoryPicker();
+                targetFolderHandle = await parentDir.getDirectoryHandle(safeSeasonTitle, { create: true });
+                window.taskTargetFolder = targetFolderHandle;
+                showToast(`已选定本地文件夹 [${safeSeasonTitle}]，正在加入批量下载队列...`, "success");
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                showToast("未授予本地文件夹权限，已自动切换为浏览器下载模式", "info");
+                mode = 'direct';
+            }
+        } else {
+            mode = 'direct';
+        }
+    }
+
+    // 构建任务列表并加入全局队列
+    const newTasks = episodes.map(ep => {
+        const pageStr = String(ep.page).padStart(2, '0');
+        const epCleanTitle = (ep.title || `第${ep.page}集`).replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30);
+        return {
+            id: `task_${ep.page}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            title: `P${pageStr} ${ep.title || `第${ep.page}集`}`,
+            filename: `${safeSeasonTitle}_P${pageStr}_${epCleanTitle}.mp4`,
+            share_url: ep.share_url,
+            status: 'waiting',
+            progress: 0,
+            errorMsg: '',
+            mode: mode,
+        };
+    });
+
+    window.taskQueue.push(...newTasks);
+    window.isTaskQueuePaused = false;
+
+    // 打开任务管理器抽屉
+    toggleTaskManager(true);
+    showToast(`已成功将 ${newTasks.length} 集加入下载任务管理器！`, "success");
+
+    // 开始调度
+    scheduleTaskQueue();
+}
+
+// 重新检测/刷新当前视频的分P列表与合集
+async function refreshCurrentEpisodes() {
+    if (!window.currentMediaData) return;
+    const url = window.currentMediaData.share_url || document.getElementById("urlInput")?.value;
+    if (!url) return;
+
+    showToast("🔄 正在强制重新探测全部分P列表与合集数据...", "info");
+    
+    try {
+        const sessdata = getBiliSessdata();
+        const response = await fetch("/api/parse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: url, sessdata: sessdata || null }),
+        });
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+            renderResult(data);
+            const epCount = (data.episodes && data.episodes.length) || 0;
+            if (epCount > 0) {
+                showToast(`🎉 刷新成功！共探测到 ${epCount} 集分P/合集！`, "success");
+            } else {
+                showToast("该视频经多通道校验为单集视频", "info");
+            }
+        } else {
+            showToast(data.detail || data.error || "刷新分P失败", "error");
+        }
+    } catch (err) {
+        showToast("网络请求异常: " + err.message, "error");
+    }
 }
 
 // 批量下载图集
@@ -1066,6 +1491,9 @@ function renderCreatorPosts(posts, isAppend = false) {
         const dateStr = post.create_time ? new Date(post.create_time * 1000).toLocaleDateString() : "";
         const durStr = post.duration ? formatDuration(post.duration) : "";
 
+        const isSeason = post.is_season || Boolean(post.season_label);
+        const seasonLabel = post.season_label || '合集';
+
         return `
             <div class="post-card ${isSelected ? 'is-selected' : ''}" id="post_card_${post.id}" onclick="togglePostSelect('${post.id}')">
                 <div class="post-thumb-wrap">
@@ -1073,9 +1501,13 @@ function renderCreatorPosts(posts, isAppend = false) {
                     <div class="post-checkbox">
                         <i class="fa-solid fa-check"></i>
                     </div>
+                    ${isSeason ? `
+                    <div class="post-season-badge" title="这是一个合集/多P作品">
+                        <i class="fa-solid fa-layer-group"></i> ${seasonLabel}
+                    </div>` : `
                     <div class="post-type-badge">
                         ${isImages ? `<i class="fa-regular fa-images"></i> 图集` : `<i class="fa-solid fa-play"></i> 视频`}
-                    </div>
+                    </div>`}
                     <div class="post-stat-bottom">
                         <span><i class="fa-regular fa-heart"></i> ${formatNumber(post.digg_count)}</span>
                         ${durStr ? `<span>${durStr}</span>` : ''}
@@ -1087,9 +1519,13 @@ function renderCreatorPosts(posts, isAppend = false) {
                     </div>
                     <div class="post-action-row">
                         <span class="post-date-tag">${dateStr}</span>
+                        ${isSeason ? `
+                        <button class="btn-post-dl" onclick="event.stopPropagation(); parseAndOpenMedia('${post.share_url || post.id}')" title="进入合集解析与下载" style="background: rgba(236, 72, 153, 0.2); border-color: #ec4899; color: #f472b6;">
+                            <i class="fa-solid fa-layer-group"></i> 解析合集
+                        </button>` : `
                         <button class="btn-post-dl" onclick="event.stopPropagation(); downloadPostItem(window.currentCreatorData.posts.find(p => p.id === '${post.id}'), window.currentBatchQuality || 'highest')" title="按当前选定画质下载">
                             <i class="fa-solid fa-download"></i> 保存
-                        </button>
+                        </button>`}
                     </div>
                 </div>
             </div>
@@ -1271,6 +1707,25 @@ if (creatorLoadMoreBtn) {
             creatorLoadMoreBtn.innerHTML = `<i class="fa-solid fa-chevron-down"></i> 加载更多作品`;
         }
     });
+}
+
+// 从博主空间直接一键跳转并解析合集作品
+function parseAndOpenMedia(url) {
+    if (!url) return;
+    // 切换到单作品解析 Tab
+    const singleTabBtn = document.querySelector('.nav-tab[data-tab="single"]');
+    if (singleTabBtn) {
+        singleTabBtn.click();
+    }
+    const inputEl = document.getElementById("urlInput");
+    const parseBtn = document.getElementById("parseBtn");
+    if (inputEl) {
+        inputEl.value = url;
+    }
+    showToast("正在为您深度解析该合集所有分集...", "info");
+    if (parseBtn) {
+        parseBtn.click();
+    }
 }
 
 // 页面初始化

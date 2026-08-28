@@ -231,8 +231,21 @@ class BilibiliExtractor(BaseExtractor):
             coin_count=int(stat.get("coin", 0) or 0),
         )
 
-        # 2. 提取分P列表 (pages)
+        # 2. 提取分P列表 (pages)，若 view 接口未返回完整 pages 则自动通过 pagelist 接口补全
         raw_pages = view_data.get("pages", [])
+        if not raw_pages or len(raw_pages) <= 1:
+            try:
+                async with httpx.AsyncClient(headers=custom_headers, timeout=self.timeout) as pl_client:
+                    pl_resp = await pl_client.get(f"https://api.bilibili.com/x/player/pagelist?bvid={bvid}")
+                    if pl_resp.status_code == 200:
+                        pl_json = pl_resp.json()
+                        if pl_json.get("code") == 0 and pl_json.get("data"):
+                            pl_data = pl_json.get("data", [])
+                            if len(pl_data) > len(raw_pages):
+                                raw_pages = pl_data
+            except Exception:
+                pass
+
         episodes: List[VideoEpisode] = []
         target_cid = default_cid
         target_page_title = ""
@@ -614,6 +627,17 @@ class BilibiliExtractor(BaseExtractor):
                             if v.get("author"):
                                 user_info.nickname = v.get("author")
 
+                        # 识别视频合集与分P标识 (如 【全1000集】、共xx讲、分P等)
+                        is_season = bool(v.get("is_season") or v.get("season_id") or v.get("ugc_season"))
+                        season_label = ""
+                        m_season = re.search(r"【全(\d+)[集P讲话]】|\[全(\d+)[集P讲话]\]|[【\[]共(\d+)[集P讲话][】\]]|全(\d+)[集P讲话]|1[~-](\d+)[集P讲话]", title)
+                        if m_season:
+                            is_season = True
+                            count_str = next(g for g in m_season.groups() if g)
+                            season_label = f"合集·共{count_str}集"
+                        elif is_season:
+                            season_label = "合集"
+
                         posts.append(UserPostItem(
                             id=bvid,
                             title=title,
@@ -626,6 +650,8 @@ class BilibiliExtractor(BaseExtractor):
                             download_url=f"https://www.bilibili.com/video/{bvid}",
                             images=[],
                             share_url=f"https://www.bilibili.com/video/{bvid}",
+                            is_season=is_season,
+                            season_label=season_label,
                         ))
 
                     has_more = (page_num * count) < total_count

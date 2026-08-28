@@ -15,7 +15,7 @@
         rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.2.3.2">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.2.4.5">
 </head>
 
 <body>
@@ -215,7 +215,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.2.3.1</span>
+                    <span class="badge badge-version">v2.2.4.5</span>
                 </div>
             </div>
         </footer>
@@ -300,10 +300,56 @@
         </div>
     </div>
 
+    <!-- 批量下载任务管理器 (悬浮弹窗/抽屉) -->
+    <div class="task-manager-drawer" id="taskManagerDrawer" style="display: none;">
+        <div class="task-manager-header">
+            <div class="task-manager-title">
+                <i class="fa-solid fa-cloud-arrow-down text-gradient"></i>
+                <span>批量任务管理器</span>
+                <span class="badge badge-version" id="taskTotalBadge" style="font-size: 10px;">0 项</span>
+            </div>
+            <div class="task-manager-ctrls">
+                <button class="btn-tm-ctrl" id="btnPauseAll" onclick="pauseAllTasks()" title="暂停全部任务">
+                    <i class="fa-solid fa-pause"></i> 暂停全部
+                </button>
+                <button class="btn-tm-ctrl" id="btnResumeAll" onclick="resumeAllTasks()" title="继续全部任务">
+                    <i class="fa-solid fa-play"></i> 开始全部
+                </button>
+                <button class="btn-tm-ctrl" onclick="clearCompletedTasks()" title="清空已完成">
+                    <i class="fa-solid fa-trash-can"></i> 清除完成
+                </button>
+                <button class="btn-tm-close" onclick="toggleTaskManager(false)" title="最小化任务栏">
+                    <i class="fa-solid fa-chevron-down"></i>
+                </button>
+            </div>
+        </div>
+        <div class="task-manager-summary">
+            <div class="task-stat-bar">
+                <div class="task-stat-item"><span class="dot dot-running"></span>进行: <b id="statRunning">0</b></div>
+                <div class="task-stat-item"><span class="dot dot-waiting"></span>等待: <b id="statWaiting">0</b></div>
+                <div class="task-stat-item"><span class="dot dot-paused"></span>暂停: <b id="statPaused">0</b></div>
+                <div class="task-stat-item"><span class="dot dot-success"></span>完成: <b id="statSuccess">0</b></div>
+                <div class="task-stat-item"><span class="dot dot-error"></span>失败: <b id="statError">0</b></div>
+            </div>
+            <div class="overall-progress-track">
+                <div class="overall-progress-bar" id="overallProgressBar" style="width: 0%;"></div>
+            </div>
+        </div>
+        <div class="task-manager-list" id="taskManagerList">
+            <!-- 动态渲染任务项 -->
+        </div>
+    </div>
+
+    <!-- 最小化任务气泡 -->
+    <div class="task-manager-bubble" id="taskManagerBubble" style="display: none;" onclick="toggleTaskManager(true)" title="点击展开任务管理器">
+        <i class="fa-solid fa-cloud-arrow-down fa-bounce"></i>
+        <span class="tm-bubble-text" id="tmBubbleText">下载管理 (0/0)</span>
+    </div>
+
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.2.3.1"></script>
+    <script src="/static/js/app.js?v=2.2.4.5"></script>
 </body>
 
 </html>

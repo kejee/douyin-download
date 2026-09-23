@@ -15,7 +15,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.3.2.0"
+APP_VERSION = "2.4.0.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -253,6 +253,8 @@ class ServerDownloadItem(BaseModel):
     filename: Optional[str] = None
     subdir: Optional[str] = None
     task_id: Optional[str] = None
+    direct_backup_urls: Optional[List[str]] = None
+    audio_backup_urls: Optional[List[str]] = None
 
 class ServerBatchDownloadRequest(BaseModel):
     tasks: List[ServerDownloadItem]
@@ -280,6 +282,8 @@ async def create_server_downloads(req: ServerBatchDownloadRequest):
             filename=item.filename,
             subdir=item.subdir,
             task_id=item.task_id,
+            direct_backup_urls=item.direct_backup_urls,
+            audio_backup_urls=item.audio_backup_urls,
         )
         created_tasks.append(task)
     return {"success": True, "count": len(created_tasks), "tasks": created_tasks}
@@ -351,6 +355,8 @@ async def create_local_downloads(req: ServerBatchDownloadRequest):
             filename=item.filename,
             subdir=item.subdir,
             task_id=item.task_id,
+            direct_backup_urls=item.direct_backup_urls,
+            audio_backup_urls=item.audio_backup_urls,
         )
         created_tasks.append(task)
     return {"success": True, "count": len(created_tasks), "tasks": created_tasks}

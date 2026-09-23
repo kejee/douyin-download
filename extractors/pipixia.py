@@ -140,10 +140,16 @@ class PipixiaExtractor(BaseExtractor):
                 # 1. 优先从 item 根层级提取 origin_video_download (原始无水印)
                 origin_video_download = item.get("origin_video_download")
                 no_wm_url = ""
+                video_backup_urls = []
                 if origin_video_download and isinstance(origin_video_download, dict):
                     u_list = origin_video_download.get("url_list", [])
                     if u_list:
                         no_wm_url = u_list[0].get("url") if isinstance(u_list[0], dict) else u_list[0]
+                        video_backup_urls = [
+                            x.get("url") if isinstance(x, dict) else x
+                            for x in u_list[1:]
+                            if x
+                        ]
 
                 # 2. 依次尝试 video_high / video_fallback / video_download
                 wm_url = ""
@@ -188,6 +194,7 @@ class PipixiaExtractor(BaseExtractor):
                     video=VideoInfo(
                         no_watermark_url=no_wm_url,
                         watermark_url=wm_url,
+                        video_backup_urls=video_backup_urls,
                         ratio=f"{width}x{height}" if width and height else "720p",
                         width=width,
                         height=height,

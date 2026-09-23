@@ -16,13 +16,13 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: UniversalDownloader-Windows-x64.zip
-            asset_path: dist/UniversalDownloader.exe
+            asset_path: dist/UniversalDownloader-Windows-x64.zip
           - os: macos-latest
             artifact_name: UniversalDownloader-macOS-Universal.zip
             asset_path: dist/UniversalDownloader.app
           - os: ubuntu-22.04
             artifact_name: UniversalDownloader-Linux-x86_64.tar.gz
-            asset_path: dist/UniversalDownloader
+            asset_path: dist/UniversalDownloader-Linux-x86_64.tar.gz
 
     steps:
       - name: Checkout Code
@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/UniversalDownloader.exe -DestinationPath dist/UniversalDownloader-Windows-x64.zip
+          Compress-Archive -Path dist/UniversalDownloader -DestinationPath dist/UniversalDownloader-Windows-x64.zip
 
       - name: Package Artifact (macOS)
         if: runner.os == 'macOS'

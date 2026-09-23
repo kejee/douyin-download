@@ -7,15 +7,10 @@
     <title>万能短视频 & B站视频在线解析下载 | 抖音·小红书·快手·皮皮虾·B站·TikTok</title>
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700&display=swap"
-        rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.3.2.0">
+    <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.4.0.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.4.0.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.4.0.0">
 </head>
 
 <body>
@@ -189,7 +184,7 @@
             </section>
 
             <!-- 广告与赞助商推荐区 (在免责声明上方) -->
-            <section class="card ad-card-container">
+            <section class="card ad-card-container" id="sponsorAdCard">
                 <div class="ad-card-header">
                     <span class="ad-tag"><i class="fa-solid fa-rectangle-ad"></i> 赞助推荐</span>
                     <a href="https://www.profitableratecpmnetwork.com/zndd9uqj?key=1ab6b3b6171a2adbf6a554152428783d"
@@ -198,8 +193,8 @@
                     </a>
                 </div>
                 <div class="ad-banner-body">
-                    <script async="async" data-cfasync="false"
-                        src="https://pl31021771.profitableratecpmnetwork.com/8cf9c301fd152cb4c0ab0b55a66d8166/invoke.js"></script>
+                    <!-- 第三方广告脚本不在此静态引入：桌面客户端永不加载，
+                         网页版由 app.js 的 initSponsorAd() 动态注入以保持原有时序 -->
                     <div id="container-8cf9c301fd152cb4c0ab0b55a66d8166"></div>
                 </div>
             </section>
@@ -219,7 +214,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.3.2.0</span>
+                    <span class="badge badge-version">v2.4.0.0</span>
                 </div>
             </div>
         </footer>
@@ -379,7 +374,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.3.2.0"></script>
+    <script src="/static/js/app.js?v=2.4.0.0"></script>
 </body>
 
 </html>

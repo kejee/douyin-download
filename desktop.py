@@ -96,10 +96,13 @@ def register_bundled_ffmpeg() -> str:
             exe = os.path.join(candidate_dir, name)
             if not os.path.isfile(exe):
                 continue
-            try:
-                os.chmod(exe, 0o755)
-            except OSError:
-                pass
+            # 仅在确实缺少可执行位时才 chmod：打包时已带 +x，
+            # 多余的系统调用在只读安装位置（如 /Applications）会失败或被安全软件拦截
+            if not os.access(exe, os.X_OK):
+                try:
+                    os.chmod(exe, 0o755)
+                except OSError as exc:
+                    log.warning(f"无法为内嵌 ffmpeg 补可执行权限（{exe}）: {exc}")
             os.environ["PATH"] = candidate_dir + os.pathsep + os.environ.get("PATH", "")
             return exe
 

@@ -5,7 +5,7 @@ import logging
 import shutil
 import time
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 from extractors.router import UnifiedMediaRouter
 from downloader.paths import (
@@ -47,6 +47,8 @@ class ServerTask(BaseModel):
     audio_url: Optional[str] = None
     sessdata: Optional[str] = None
     channel: str = "server"  # server: NAS/服务端归档 | local: 桌面端本地保存
+    direct_backup_urls: List[str] = Field(default_factory=list, description="视频轨备用直链")
+    audio_backup_urls: List[str] = Field(default_factory=list, description="音频轨备用直链")
     status: str = "waiting"  # waiting | running | paused | success | error
     progress: int = 0
     total_bytes: int = 0
@@ -133,6 +135,8 @@ class ServerDownloadManager:
         filename: Optional[str] = None,
         subdir: Optional[str] = None,
         task_id: Optional[str] = None,
+        direct_backup_urls: Optional[List[str]] = None,
+        audio_backup_urls: Optional[List[str]] = None,
     ) -> ServerTask:
         """解析归档路径并加入下载队列。
 
@@ -179,6 +183,8 @@ class ServerDownloadManager:
             audio_url=audio_url,
             sessdata=sessdata,
             channel=channel,
+            direct_backup_urls=list(direct_backup_urls or []),
+            audio_backup_urls=list(audio_backup_urls or []),
             status="waiting",
             progress=0,
             created_at=time.time(),
@@ -210,6 +216,8 @@ class ServerDownloadManager:
             try:
                 v_url = task.direct_url
                 a_url = task.audio_url
+                v_backups = list(task.direct_backup_urls or [])
+                a_backups = list(task.audio_backup_urls or [])
 
                 # 如果传入的是作品/分集页面链接，先进行核心解析
                 if not v_url and task.url:
@@ -218,6 +226,8 @@ class ServerDownloadManager:
                         raise ValueError(parse_result.error or "解析媒体数据失败")
                     v_url = parse_result.video.no_watermark_url
                     a_url = parse_result.video.audio_url
+                    v_backups = list(parse_result.video.video_backup_urls or [])
+                    a_backups = list(parse_result.video.audio_backup_urls or [])
                     logger.info(
                         f"[{task.id}] 解析完成 | {parse_result.platform_name} | "
                         f"视频源={host_of(v_url)} | 音频轨={'有' if a_url else '无'}"
@@ -228,9 +238,9 @@ class ServerDownloadManager:
 
                 # 如果需要音视频混流 (如 B站 DASH 音视频分离格式)
                 if a_url:
-                    await self._download_and_mux_ffmpeg(task, v_url, a_url)
+                    await self._download_and_mux_ffmpeg(task, v_url, a_url, v_backups, a_backups)
                 else:
-                    await self._download_direct_stream(task, v_url)
+                    await self._download_direct_stream(task, v_url, v_backups)
 
                 task.status = "success"
                 task.progress = 100
@@ -277,11 +287,17 @@ class ServerDownloadManager:
             except OSError:
                 pass
 
-    async def _download_direct_stream(self, task: ServerTask, video_url: str):
+    async def _download_direct_stream(
+        self,
+        task: ServerTask,
+        video_url: str,
+        backups: Optional[List[str]] = None,
+    ):
         """直链流式落盘（失败自动换源）"""
         temp_path = f"{task.save_path}.downloading"
         await self._download_track(
-            task, video_url, temp_path, label="媒体流", base_progress=0, span=95
+            task, video_url, temp_path, label="媒体流",
+            base_progress=0, span=95, backups=backups,
         )
 
         # 完成后原子重命名
@@ -330,6 +346,11 @@ class ServerDownloadManager:
             except _SourceRejected as exc:
                 last_error = str(exc)
                 continue
+            except httpx.HTTPError as exc:
+                # 连接被拒 / DNS 失败 / 超时 / 协议错误同样换源重试。
+                # CDN 主机不可达是比 4xx 更常见的故障形态，不能只对状态码换源。
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
         raise RuntimeError(
             f"{label}全部候选地址均不可用（共 {len(candidates)} 个）: {last_error}"
         )
@@ -365,7 +386,14 @@ class ServerDownloadManager:
                             )
                             self._notify_listeners("task_progress", task.dict())
 
-    async def _download_and_mux_ffmpeg(self, task: ServerTask, video_url: str, audio_url: str):
+    async def _download_and_mux_ffmpeg(
+        self,
+        task: ServerTask,
+        video_url: str,
+        audio_url: str,
+        video_backups: Optional[List[str]] = None,
+        audio_backups: Optional[List[str]] = None,
+    ):
         """下载音视频双轨并调用 FFmpeg 无损封装"""
         temp_v = f"{task.save_path}.temp_v.m4s"
         temp_a = f"{task.save_path}.temp_a.m4s"
@@ -374,14 +402,16 @@ class ServerDownloadManager:
         task.progress = 10
         self._notify_listeners("task_progress", task.dict())
         await self._download_track(
-            task, video_url, temp_v, label="视频轨", base_progress=10, span=45
+            task, video_url, temp_v, label="视频轨",
+            base_progress=10, span=45, backups=video_backups,
         )
 
         # 2. 下载音频轨
         task.progress = 60
         self._notify_listeners("task_progress", task.dict())
         await self._download_track(
-            task, audio_url, temp_a, label="音频轨", base_progress=60, span=25
+            task, audio_url, temp_a, label="音频轨",
+            base_progress=60, span=25, backups=audio_backups,
         )
 
         # 3. FFmpeg 极速封装落盘 (copy 流无损不转码)

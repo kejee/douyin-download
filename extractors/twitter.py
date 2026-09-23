@@ -259,6 +259,11 @@ class TwitterExtractor(BaseExtractor):
 
                 best_url = qualities[0].video_url if qualities else mp4_variants[0].get("src", "")
                 best_label = qualities[0].label.split("(")[0].strip() if qualities else "高清"
+                video_backup_urls = []
+                for variant in (mp4_variants or []):
+                    src_u = variant.get("src") if isinstance(variant, dict) else None
+                    if src_u and src_u != best_url and src_u not in video_backup_urls:
+                        video_backup_urls.append(src_u)
 
                 return MediaResponse(
                     success=True,
@@ -272,6 +277,7 @@ class TwitterExtractor(BaseExtractor):
                     video=VideoInfo(
                         watermark_url="",
                         no_watermark_url=best_url,
+                        video_backup_urls=video_backup_urls,
                         audio_url="",
                         ratio=best_label,
                         duration=duration_sec,
@@ -414,6 +420,11 @@ class TwitterExtractor(BaseExtractor):
 
         best_video_url = qualities[0].video_url if qualities else (mp4_formats[0].get("url") if mp4_formats else data.get("url", ""))
         best_ratio = qualities[0].label.split("(")[0].strip() if qualities else "高清"
+        video_backup_urls = []
+        for variant in (mp4_formats or []):
+            src_u = variant.get("url") if isinstance(variant, dict) else None
+            if src_u and src_u != best_video_url and src_u not in video_backup_urls:
+                video_backup_urls.append(src_u)
         cover = data.get("thumbnail", "")
         duration = int(data.get("duration", 0))
 
@@ -429,6 +440,7 @@ class TwitterExtractor(BaseExtractor):
             video=VideoInfo(
                 watermark_url="",
                 no_watermark_url=best_video_url,
+                video_backup_urls=video_backup_urls,
                 audio_url="",
                 ratio=best_ratio,
                 duration=duration,

@@ -1,11 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""桌面客户端打包配置。
+"""桌面客户端打包配置（onedir 模式）。
 
 关键点：
-1. 内嵌静态 ffmpeg（由 imageio-ffmpeg 提供）到 ffmpeg_bin/，客户端开箱即用
-   B站 DASH 音视频混流，不再依赖用户本机是否装了 ffmpeg；
-2. upx 必须为 False —— UPX 在 macOS 不受支持，且会破坏内嵌二进制；
-3. 版本号写入 Info.plist 的 CFBundleShortVersionString（否则 Finder 显示 0.0.0）。
+1. **onedir**：PyInstaller 6.x 已明确警告「onefile 与 macOS .app 组合不合理」
+   （单一文件不可能同时是一个 bundle），并声明 v7 会变成硬错误；且 onefile
+   每次启动都要解压 ~70MB（内嵌 ffmpeg 占大头），冷启动明显更慢。改为 onedir。
+2. 内嵌静态 ffmpeg（imageio-ffmpeg 提供）到 ffmpeg_bin/，B站 DASH 混流开箱可用。
+3. upx 必须为 False —— UPX 在 macOS 不受支持，且会破坏内嵌二进制。
+4. 图标从 assets/ 自动拾取；缺失时回落到 PyInstaller 默认图标并打印提示。
+   用 scripts/build_app_icon.py 从一张 1024x1024 PNG 生成 icon.icns。
 """
 
 import os
@@ -15,9 +18,18 @@ import tempfile
 
 block_cipher = None
 
-APP_VERSION = "2.3.2.0"
+APP_VERSION = "2.4.0.0"
 
 FFMPEG_EXE_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+
+def _asset(*candidates: str) -> str:
+    """按顺序在 assets/ 下找第一个存在的资源，找不到返回 None"""
+    for name in candidates:
+        path = os.path.join(SPECPATH, "assets", name)
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def stage_ffmpeg() -> str:
@@ -32,6 +44,19 @@ def stage_ffmpeg() -> str:
     print(f"[spec] 内嵌 ffmpeg: {dst} ({os.path.getsize(dst) / 1024 / 1024:.1f} MB)")
     return dst
 
+
+if sys.platform == "darwin":
+    ICON = _asset("icon.icns", "icon.png")
+elif sys.platform == "win32":
+    ICON = _asset("icon.ico", "icon.png")
+else:
+    ICON = _asset("icon.png")
+
+if ICON:
+    print(f"[spec] 应用图标: {ICON}")
+else:
+    print("[spec] assets/ 下没有图标，将使用 PyInstaller 默认图标"
+          "（可执行 scripts/build_app_icon.py 从一张 1024x1024 PNG 生成 icon.icns）")
 
 added_files = [
     ('static', 'static'),
@@ -74,33 +99,41 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# onedir：EXE 只负责引导，依赖与数据交由 COLLECT 收集
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='UniversalDownloader',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=None if sys.platform == 'darwin' else ICON,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='UniversalDownloader',
 )
 
 if sys.platform == 'darwin':
     app = BUNDLE(
-        exe,
+        coll,
         name='UniversalDownloader.app',
-        icon=None,
+        icon=ICON,
         bundle_identifier='com.universal.downloader',
         version=APP_VERSION,
         info_plist={

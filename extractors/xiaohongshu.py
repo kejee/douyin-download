@@ -134,8 +134,18 @@ class XiaohongshuExtractor(BaseExtractor):
                 h264_list = stream.get("h264", []) or stream.get("h265", [])
                 
                 video_url = ""
+                video_backup_urls = []
                 if h264_list and isinstance(h264_list, list):
-                    video_url = h264_list[0].get("masterUrl", "")
+                    first_stream = h264_list[0]
+                    video_url = first_stream.get("masterUrl", "")
+                    # 小红书同档流自带 backupUrls，再加上其它档位地址作为换源候选
+                    for u in (first_stream.get("backupUrls") or []):
+                        if u and u != video_url and u not in video_backup_urls:
+                            video_backup_urls.append(u)
+                    for item in h264_list[1:]:
+                        u = item.get("masterUrl") if isinstance(item, dict) else None
+                        if u and u not in video_backup_urls:
+                            video_backup_urls.append(u)
 
                 # 封面 (提取完整有效防盗链签名地址)
                 cover_url = ""
@@ -157,6 +167,7 @@ class XiaohongshuExtractor(BaseExtractor):
                     video=VideoInfo(
                         no_watermark_url=video_url,
                         watermark_url=video_url,
+                        video_backup_urls=video_backup_urls,
                         ratio="1080p",
                     ),
                     create_time=create_time,

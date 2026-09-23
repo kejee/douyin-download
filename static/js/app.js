@@ -282,6 +282,23 @@ async function copyToClipboard(text, label = "链接") {
     }
 }
 
+// ==========================================================================
+// 媒体地址备用直链注册表
+// 解析结果里每个地址（各档画质、音轨）都带有备用 CDN 直链。下载时按 URL 查表，
+// 好处是无需把地址数组序列化进 onclick 字符串（转义易错、还会撑大 DOM）。
+// ==========================================================================
+window.urlBackups = {};
+
+function registerUrlBackups(url, backups) {
+    if (!url || !Array.isArray(backups) || backups.length === 0) return;
+    const list = backups.filter(u => typeof u === "string" && u && u !== url);
+    if (list.length) window.urlBackups[url] = list;
+}
+
+function backupsForUrl(url) {
+    return (url && window.urlBackups[url]) || [];
+}
+
 // 触发下载 (统一接入任务管理器与真实流式进度)
 function triggerDownload(url, filename) {
     if (!url) return;
@@ -293,6 +310,7 @@ function triggerDownload(url, filename) {
         title: safeFilename,
         filename: safeFilename,
         directUrl: url,
+        directBackups: backupsForUrl(url),
         status: 'waiting',
         progress: 0,
         errorMsg: null,
@@ -442,6 +460,14 @@ function renderResult(data) {
         const hasQualities = video.qualities && video.qualities.length > 0;
         const defaultQ = hasQualities ? video.qualities[0] : null;
         const defaultQName = defaultQ ? defaultQ.label.split("(")[0].trim() : (video.ratio || '高清');
+
+        // 把各档画质与音轨的备用直链登记好，后续任一地址被拒都能自动换源
+        registerUrlBackups(noWmUrl, video.video_backup_urls);
+        registerUrlBackups(audioUrl, video.audio_backup_urls);
+        (video.qualities || []).forEach(q => {
+            registerUrlBackups(q.video_url, q.video_backup_urls);
+            registerUrlBackups(q.audio_url, q.audio_backup_urls);
+        });
 
         const primaryBtnClick = isBilibili && audioUrl
             ? `triggerMuxDownload('${defaultQ ? defaultQ.video_url : noWmUrl}', '${defaultQ ? defaultQ.audio_url : audioUrl}', '${cleanTitle}_${defaultQName}.mp4')`
@@ -953,6 +979,31 @@ async function openDownloadFolder() {
     await window.pywebview.api.open_path(window.localDir || "");
 }
 
+// ==========================================================================
+// 赞助广告：桌面客户端不加载第三方广告脚本
+// 说明：广告网络脚本改为动态注入（原先写死在 HTML 里，桌面端无法屏蔽），
+//       网页版行为与之前一致；桌面端则整块隐藏，避免无场景的第三方请求。
+// ==========================================================================
+const SPONSOR_AD_SCRIPT_ID = "sponsorAdScript";
+const SPONSOR_AD_SRC =
+    "https://pl31021771.profitableratecpmnetwork.com/8cf9c301fd152cb4c0ab0b55a66d8166/invoke.js";
+
+function initSponsorAd() {
+    const inDesktop = window.isDesktop || !!(window.pywebview && window.pywebview.api);
+    if (inDesktop) {
+        const card = document.getElementById("sponsorAdCard");
+        if (card) card.style.display = "none";
+        return;
+    }
+    if (document.getElementById(SPONSOR_AD_SCRIPT_ID)) return;
+    const script = document.createElement("script");
+    script.id = SPONSOR_AD_SCRIPT_ID;
+    script.async = true;
+    script.setAttribute("data-cfasync", "false");
+    script.src = SPONSOR_AD_SRC;
+    document.body.appendChild(script);
+}
+
 // 初始化服务端/NAS配置与SSE
 async function initServerArchiving() {
     try {
@@ -976,6 +1027,9 @@ async function initServerArchiving() {
     } catch (e) {
         console.warn("探测服务端归档配置失败:", e);
     }
+
+    // 此时 window.isDesktop 已确定（或退化为检测 pywebview 桥）
+    initSponsorAd();
 
     try {
         const evtSource = new EventSource("/api/server/events");
@@ -1160,6 +1214,8 @@ async function submitTaskToBackend(task) {
                 filename: task.filename || null,
                 direct_url: task.directUrl || task.videoUrl || null,
                 audio_url: task.audioUrl || null,
+                direct_backup_urls: task.directBackups || task.videoBackups || [],
+                audio_backup_urls: task.audioBackups || [],
                 url: task.share_url || null,
                 season_title: task.seasonTitle || null,
                 platform: task.platform || "media",
@@ -1509,6 +1565,8 @@ function triggerMuxDownload(videoUrl, audioUrl, filename) {
         filename: safeFilename,
         videoUrl: videoUrl,
         audioUrl: audioUrl,
+        videoBackups: backupsForUrl(videoUrl),
+        audioBackups: backupsForUrl(audioUrl),
         status: 'waiting',
         progress: 0,
         errorMsg: null,

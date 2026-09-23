@@ -339,9 +339,16 @@ class DouyinExtractor(BaseExtractor):
             no_wm_url = ""
 
             play_addr = video_data.get("play_addr", {})
+            video_backup_urls = []
             if play_addr and "url_list" in play_addr and len(play_addr["url_list"]) > 0:
                 raw_url = play_addr["url_list"][0]
                 no_wm_url = raw_url.replace("playwm", "play")
+                # 抖音同一视频会给多个 CDN 主机，其余主机作为备用直链
+                video_backup_urls = [
+                    u.replace("playwm", "play")
+                    for u in play_addr["url_list"][1:]
+                    if u
+                ]
 
             download_addr = video_data.get("download_addr", {})
             if download_addr and "url_list" in download_addr and len(download_addr["url_list"]) > 0:
@@ -376,6 +383,7 @@ class DouyinExtractor(BaseExtractor):
                 video=VideoInfo(
                     no_watermark_url=real_no_wm_url,
                     watermark_url=real_wm_url,
+                    video_backup_urls=video_backup_urls,
                     ratio=ratio,
                     width=width,
                     height=height,

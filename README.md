@@ -54,6 +54,47 @@
 
 ---
 
+## 🖥️ 桌面客户端（macOS）
+
+不想折腾 Docker？直接从 [Releases](https://github.com/kejee/douyin-download/releases) 下载 `UniversalDownloader-macOS-arm64.zip`，解压后把 `UniversalDownloader.app` 拖进「应用程序」即可。功能与 Web 版一致，且不需要联网环境也能正常显示界面（字体与图标已内嵌）。
+
+**系统要求：macOS 12.0（Monterey）及以上，且必须是 Apple Silicon（M 系列芯片）。**
+目前不提供 Intel 构建产物；在 Intel Mac 上打开会提示「此应用不支持此架构」。
+
+### 首次打开会被系统拦住，这是正常的
+
+客户端使用临时签名（ad-hoc），没有购买 Apple 开发者证书做公证，因此 Gatekeeper 会拦截首次启动。任选一种方式放行，**只需做一次**：
+
+**方式 1：右键打开（最简单）**
+
+1. 在「应用程序」里**右键点击**（或按住 Control 点击）`UniversalDownloader.app`，选择「打开」
+2. 弹窗里再点一次「打开」
+3. 之后双击就能正常启动了
+
+**方式 2：系统设置里放行**
+
+打开「系统设置 → 隐私与安全性」，在底部找到“已阻止使用 UniversalDownloader”的提示，点击「仍要打开」。
+
+**方式 3：命令行移除隔离标记**
+
+```bash
+xattr -dr com.apple.quarantine /Applications/UniversalDownloader.app
+```
+
+如果双击时提示「无法验证开发者」或「Apple 无法检查其是否包含恶意软件」，都是同一个原因，用上面任一方式即可解决。
+
+### 应用数据位置
+
+| 内容 | 路径 |
+| --- | --- |
+| 下载的文件 | `~/Downloads/UniversalDownloader`（可在界面里更改） |
+| 配置 | `~/Library/Application Support/UniversalDownloader/settings.json` |
+| 运行日志 | `~/Library/Application Support/UniversalDownloader/logs/desktop.log` |
+
+应用固定在 `127.0.0.1:18760` 提供服务，同一时刻只运行一个实例（重复启动会复用已有实例，这是 B 站 SESSDATA 等设置能跨重启保留的前提）。遇到问题请附上 `desktop.log`，未捕获的异常都会记录在那里。
+
+---
+
 ## 🚀 快速开始
 
 ### 方式一：Docker Compose（推荐）

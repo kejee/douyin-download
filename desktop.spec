@@ -139,6 +139,10 @@ if sys.platform == 'darwin':
         info_plist={
             'CFBundleShortVersionString': APP_VERSION,
             'CFBundleVersion': APP_VERSION,
+            # 最低系统版本取包内二进制的实际 minos：内嵌 ffmpeg 为 12.0
+            # （主程序与 libpython 是 11.0，ffmpeg 最高，故取 12.0）。
+            # 显式声明后，低版本系统会给出版本提示，而不是启动时莫名失败。
+            'LSMinimumSystemVersion': '12.0',
             'NSHighResolutionCapable': 'True',
             'LSBackgroundOnly': 'False',
             'NSRequiresAquaSystemAppearance': 'False',

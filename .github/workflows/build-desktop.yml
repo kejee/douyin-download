@@ -16,13 +16,12 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: UniversalDownloader-Windows-x64.zip
-            asset_path: dist/UniversalDownloader-Windows-x64.zip
+          # 产物是 arm64（macos-latest runner 即 Apple Silicon），
+          # 资产名必须如实反映架构，否则 Intel 用户会下载到跑不起来的包
           - os: macos-latest
-            artifact_name: UniversalDownloader-macOS-Universal.zip
-            asset_path: dist/UniversalDownloader.app
+            artifact_name: UniversalDownloader-macOS-arm64.zip
           - os: ubuntu-22.04
             artifact_name: UniversalDownloader-Linux-x86_64.tar.gz
-            asset_path: dist/UniversalDownloader-Linux-x86_64.tar.gz
 
     steps:
       - name: Checkout Code
@@ -57,7 +56,7 @@ jobs:
       - name: Package Artifact (macOS)
         if: runner.os == 'macOS'
         run: |
-          cd dist && zip -r UniversalDownloader-macOS-Universal.zip UniversalDownloader.app
+          cd dist && zip -r UniversalDownloader-macOS-arm64.zip UniversalDownloader.app
 
       - name: Package Artifact (Linux)
         if: runner.os == 'Linux'
@@ -85,5 +84,26 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: artifacts/**/*
+          body: |
+            ## 下载
+
+            | 平台 | 文件 | 说明 |
+            | --- | --- | --- |
+            | macOS | `UniversalDownloader-macOS-arm64.zip` | 仅 Apple Silicon（M 系列芯片） |
+            | Windows | `UniversalDownloader-Windows-x64.zip` | x64 |
+            | Linux | `UniversalDownloader-Linux-x86_64.tar.gz` | x86_64 |
+
+            ## macOS 首次打开
+
+            客户端使用临时签名（ad-hoc），未做 Apple 公证，首次打开会被 Gatekeeper 拦截。
+            任选一种方式放行，只需做一次：
+
+            1. **右键打开**：在「应用程序」里右键点击（或按住 Control 点击）`UniversalDownloader.app`
+               → 选「打开」→ 弹窗里再点一次「打开」，之后双击即可正常启动
+            2. **系统设置**：「系统设置 → 隐私与安全性」，在底部点击「仍要打开」
+            3. **命令行**：`xattr -dr com.apple.quarantine /Applications/UniversalDownloader.app`
+
+            系统要求 **macOS 12.0 及以上**，且必须是 **Apple Silicon**。
+            详细说明见项目 README 的「桌面客户端（macOS）」章节。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -24,6 +24,16 @@ logger = logging.getLogger(__name__)
 class _SourceRejected(Exception):
     """媒体源在响应头阶段就被拒（4xx/5xx），可换源重试"""
 
+
+def _fmt_size(num_bytes: int) -> str:
+    """人类可读的体积字符串（日志用）"""
+    size = float(num_bytes or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{int(size)}B" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}GB"
+
 # 下载归档根目录（不依赖进程 cwd；本模块导入期不做任何磁盘写入）
 DOWNLOAD_DIR = default_download_dir()
 
@@ -174,6 +184,9 @@ class ServerDownloadManager:
             created_at=time.time(),
         )
 
+        logger.info(
+            f"[{task_id}] 任务创建 | channel={channel} | {filename} -> {save_path}"
+        )
         self.tasks[task_id] = task
         self._notify_listeners("task_added", task.dict())
         
@@ -188,6 +201,10 @@ class ServerDownloadManager:
 
             task.status = "running"
             task.progress = 5
+            logger.info(
+                f"[{task.id}] 开始下载 | {task.filename} | 来源="
+                f"{'作品链接' if (task.url and not task.direct_url) else '直链'}"
+            )
             self._notify_listeners("task_progress", task.dict())
 
             try:
@@ -201,6 +218,10 @@ class ServerDownloadManager:
                         raise ValueError(parse_result.error or "解析媒体数据失败")
                     v_url = parse_result.video.no_watermark_url
                     a_url = parse_result.video.audio_url
+                    logger.info(
+                        f"[{task.id}] 解析完成 | {parse_result.platform_name} | "
+                        f"视频源={host_of(v_url)} | 音频轨={'有' if a_url else '无'}"
+                    )
 
                 if not v_url:
                     raise ValueError("未提取到有效的视频下载流地址")
@@ -213,16 +234,31 @@ class ServerDownloadManager:
 
                 task.status = "success"
                 task.progress = 100
+                final_size = (
+                    os.path.getsize(task.save_path) if os.path.exists(task.save_path) else 0
+                )
+                logger.info(
+                    f"[{task.id}] 下载完成 | {task.filename} | {_fmt_size(final_size)} | "
+                    f"耗时 {time.time() - task.created_at:.1f}s | {task.save_path}"
+                )
                 self._notify_listeners("task_success", task.dict())
             except asyncio.CancelledError:
                 self._cleanup_temp_files(task)
                 if task.status == "canceled":
+                    logger.info(f"[{task.id}] 已取消 | {task.filename}")
                     self._notify_listeners("task_canceled", task.dict())
                 else:
                     task.status = "paused"
+                    logger.info(
+                        f"[{task.id}] 已暂停 | {task.filename} | "
+                        f"已下载 {_fmt_size(task.downloaded_bytes)}/{_fmt_size(task.total_bytes)}"
+                    )
                     self._notify_listeners("task_paused", task.dict())
             except Exception as e:
-                logger.exception(f"服务端下载任务异常: {task.id}")
+                logger.exception(
+                    f"[{task.id}] 下载失败 | {task.filename} | "
+                    f"耗时 {time.time() - task.created_at:.1f}s | {e}"
+                )
                 self._cleanup_temp_files(task)
                 task.status = "error"
                 task.error = str(e)
@@ -285,6 +321,10 @@ class ServerDownloadManager:
             try:
                 await self._stream_to_file(
                     task, candidate, headers, dest_path, base_progress, span
+                )
+                logger.info(
+                    f"[{task.id}] {label} 完成 | {host_of(candidate)} | "
+                    f"{_fmt_size(task.downloaded_bytes)} | 候选 {index + 1}/{len(candidates)}"
                 )
                 return
             except _SourceRejected as exc:

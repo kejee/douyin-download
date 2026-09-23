@@ -352,9 +352,24 @@ class BilibiliExtractor(BaseExtractor):
 
                         # 所有视频清晰度
                         video_streams = dash.get("video", [])
-                        seen_qids = set()
-                        for v in video_streams:
-                            qid = v.get("id", 64)
+                        # 按 qid 分组并保持原档位顺序；同一档位内优先 AVC(H.264)。
+                        # HEVC/AV1 体积更小，但在第三方播放器与剪辑软件里兼容性差，
+                        # 下载器应以"到处都能播"为先。
+                        variants_by_qid: Dict[int, List[Dict[str, Any]]] = {}
+                        qid_order: List[int] = []
+                        for stream in video_streams:
+                            stream_qid = stream.get("id", 64)
+                            if stream_qid not in variants_by_qid:
+                                variants_by_qid[stream_qid] = []
+                                qid_order.append(stream_qid)
+                            variants_by_qid[stream_qid].append(stream)
+
+                        for qid in qid_order:
+                            variants = variants_by_qid[qid]
+                            variants.sort(
+                                key=lambda s: 0 if "avc" in str(s.get("codecs", "")).lower() else 1
+                            )
+                            v = variants[0]
                             v_candidates = stream_candidate_urls(v)
                             if not v_candidates:
                                 continue
@@ -363,11 +378,6 @@ class BilibiliExtractor(BaseExtractor):
                             h = v.get("height") or 0
                             codecs = v.get("codecs", "H.264")
                             is_avc = "avc" in codecs.lower()
-
-                            # 优先保留 AVC (H.264)
-                            if qid in seen_qids:
-                                continue
-                            seen_qids.add(qid)
 
                             q_name = QUALITY_MAP.get(qid, f"{h}P" if h else "标清")
                             label_text = f"{q_name} ({w}x{h})" if w and h else q_name

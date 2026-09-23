@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""把一张方形 PNG 转成各平台的应用图标（macOS .icns / Windows .ico）。
+"""把应用图标源文件转成各平台图标（macOS .icns / Windows .ico）。
 
-用法：
-    # 1) 准备一张 1024x1024 的方形 PNG，放到 assets/icon.png
-    # 2) 执行本脚本，会就地生成 assets/icon.icns（Windows 上生成 icon.ico）
-    python3 scripts/build_app_icon.py
+两种用法：
 
-    # 也可以指定源图与输出
+    # 推荐：直接从矢量源生成（每一档尺寸独立栅格化，小尺寸更锐利）
+    python3 scripts/build_app_icon.py --svg assets/icon.svg
+
+    # 也可以用位图源
     python3 scripts/build_app_icon.py --source ~/Desktop/logo.png
 
-生成后重新打包即可，desktop.spec 会自动拾取 assets/ 下的图标；
-图标缺失时回落到 PyInstaller 默认图标并在构建日志里给出提示。
+默认源：存在 assets/icon.svg 就用它，否则用 assets/icon.png。
+
+生成后重新打包即可生效，desktop.spec 会自动拾取 assets/ 下的图标：
+    PYINSTALLER_CONFIG_DIR=/tmp/pyi_cfg pyinstaller desktop.spec --noconfirm
 
 说明：
-- macOS 的 .icns 依赖系统自带的 sips + iconutil，无需装任何第三方库；
-- Windows 的 .ico 需要 Pillow（pip install pillow），缺失时只生成 .icns；
-- 源图建议 1024x1024、圆角留白自备（macOS 不会自动加圆角遮罩）。
+- 走 SVG 时，每一档尺寸都按 4 倍超采样（内部先渲染 4×，再用 sips 缩到目标），
+  比「从 1024 一路缩到 16」锐利得多 —— 16/32px 档位差别最明显。
+- macOS 的 .icns 依赖系统自带的 sips + iconutil，无需第三方库；
+  SVG 栅格化依赖本机 Chrome（见 scripts/render_svg.py）。
+- Windows 的 .ico 需要 Pillow（pip install pillow），缺失时只生成 .icns。
 """
 from __future__ import annotations
 
@@ -24,6 +28,11 @@ import pathlib
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from render_svg import render as render_svg_png  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # macOS iconset 需要的全部尺寸（name, 像素边长）
 ICONSET_SIZES = (
@@ -38,6 +47,10 @@ ICONSET_SIZES = (
     ("icon_512x512.png", 512),
     ("icon_512x512@2x.png", 1024),
 )
+
+# 超采样倍数与上限（上限即源矢量栅格化的最高分辨率）
+SUPERSAMPLE = 4
+MAX_RENDER = 1024
 
 
 def fail(message: str) -> "None":
@@ -54,7 +67,7 @@ def probe_png_size(path: pathlib.Path) -> tuple:
     return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
 
 
-def build_icns(source: pathlib.Path, target: pathlib.Path) -> bool:
+def have_icns_tools() -> bool:
     if sys.platform != "darwin":
         print("[跳过] .icns 只能在 macOS 上生成（依赖 sips / iconutil）")
         return False
@@ -62,25 +75,62 @@ def build_icns(source: pathlib.Path, target: pathlib.Path) -> bool:
         if shutil.which(tool) is None:
             print(f"[跳过] 未找到系统工具 {tool}")
             return False
+    return True
 
+
+def make_iconset_dir(target: pathlib.Path) -> pathlib.Path:
     iconset = target.parent / "icon.iconset"
     shutil.rmtree(iconset, ignore_errors=True)
     iconset.mkdir(parents=True)
+    return iconset
 
-    for name, size in ICONSET_SIZES:
-        subprocess.run(
-            ["sips", "-z", str(size), str(size), str(source), "--out", str(iconset / name)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+
+def resize(src: pathlib.Path, dst: pathlib.Path, size: int) -> None:
+    subprocess.run(
+        ["sips", "-z", str(size), str(size), str(src), "--out", str(dst)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def pack_iconset(iconset: pathlib.Path, target: pathlib.Path) -> None:
     subprocess.run(
         ["iconutil", "-c", "icns", str(iconset), "-o", str(target)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     shutil.rmtree(iconset, ignore_errors=True)
+
+
+def build_icns_from_svg(svg: pathlib.Path, target: pathlib.Path) -> bool:
+    """按每个目标尺寸独立栅格化（4× 超采样），而不是从 1024 一路缩小"""
+    if not have_icns_tools():
+        return False
+
+    iconset = make_iconset_dir(target)
+    # 同一档位会被多个条目复用（如 32 同时是 16@2x 与 32x32），先算出去重后的渲染尺寸
+    render_sizes = sorted({min(size * SUPERSAMPLE, MAX_RENDER) for _, size in ICONSET_SIZES})
+    print(f"[渲染] {svg.name} → {len(render_sizes)} 档超采样 "
+          f"({', '.join(str(s) for s in render_sizes)})")
+
+    staged: dict[int, pathlib.Path] = {}
+    for render_size in render_sizes:
+        out = iconset / f"_ss{render_size}.png"
+        render_svg_png(svg, out, render_size)
+        staged[render_size] = out
+
+    for name, size in ICONSET_SIZES:
+        resize(staged[min(size * SUPERSAMPLE, MAX_RENDER)], iconset / name, size)
+
+    pack_iconset(iconset, target)
+    return True
+
+
+def build_icns_from_png(source: pathlib.Path, target: pathlib.Path) -> bool:
+    if not have_icns_tools():
+        return False
+    iconset = make_iconset_dir(target)
+    for name, size in ICONSET_SIZES:
+        resize(source, iconset / name, size)
+    pack_iconset(iconset, target)
     return True
 
 
@@ -97,33 +147,53 @@ def build_ico(source: pathlib.Path, target: pathlib.Path) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="生成应用图标 (.icns / .ico)")
-    parser.add_argument("--source", default=str(pathlib.Path(__file__).resolve().parent.parent
-                                                / "assets" / "icon.png"),
-                        help="源 PNG 路径，默认 assets/icon.png")
-    parser.add_argument("--out-dir", default="",
-                        help="输出目录，默认与源文件同目录")
+    parser.add_argument("--svg", default="", help="矢量源，推荐：assets/icon.svg")
+    parser.add_argument("--source", default="", help="位图源 PNG，例如 assets/icon.png")
+    parser.add_argument("--out-dir", default="", help="输出目录，默认与源文件同目录")
     args = parser.parse_args()
 
-    source = pathlib.Path(args.source).expanduser().resolve()
-    if not source.is_file():
-        fail(f"未找到源图 {source}\n"
-             f"      请放一张 1024x1024 的方形 PNG 到 assets/icon.png，或用 --source 指定路径")
+    # 默认策略：优先矢量源
+    svg = pathlib.Path(args.svg).expanduser().resolve() if args.svg else ROOT / "assets" / "icon.svg"
+    png_arg = pathlib.Path(args.source).expanduser().resolve() if args.source else None
 
-    width, height = probe_png_size(source)
-    print(f"[输入] {source}  {width}x{height}")
-    if width != height:
-        fail("源图必须是正方形（宽高相等）")
-    if width < 512:
-        print(f"[提示] 源图仅 {width}px，建议至少 1024px，否则大尺寸图标会模糊")
+    use_svg = svg.is_file() and png_arg is None
+    if not use_svg and png_arg is None:
+        fallback_png = ROOT / "assets" / "icon.png"
+        if fallback_png.is_file():
+            png_arg = fallback_png
+        else:
+            fail("既没有 assets/icon.svg，也没有 assets/icon.png\n"
+                 "      请用 --svg 或 --source 指定图标源文件")
 
-    out_dir = pathlib.Path(args.out_dir).expanduser().resolve() if args.out_dir else source.parent
+    out_dir = (pathlib.Path(args.out_dir).expanduser().resolve() if args.out_dir
+               else (svg if use_svg else png_arg).parent)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if use_svg:
+        print(f"[输入] {svg}（矢量，按尺寸独立栅格化）")
+    else:
+        width, height = probe_png_size(png_arg)
+        print(f"[输入] {png_arg}  {width}x{height}")
+        if width != height:
+            fail("源图必须是正方形（宽高相等）")
+        if width < 512:
+            print(f"[提示] 源图仅 {width}px，建议至少 1024px，否则大尺寸图标会模糊")
+
     made = []
-    if build_icns(source, out_dir / "icon.icns"):
+    icns_ok = (build_icns_from_svg(svg, out_dir / "icon.icns") if use_svg
+               else build_icns_from_png(png_arg, out_dir / "icon.icns"))
+    if icns_ok:
         made.append(out_dir / "icon.icns")
-    if build_ico(source, out_dir / "icon.ico"):
+
+    # .ico 从一张 256 位图派生（矢量源时先落到临时 PNG）
+    ico_src = png_arg
+    if use_svg:
+        ico_src = out_dir / "_ico_src.png"
+        render_svg_png(svg, ico_src, 256)
+    if build_ico(ico_src, out_dir / "icon.ico"):
         made.append(out_dir / "icon.ico")
+    if use_svg and ico_src and ico_src.name == "_ico_src.png":
+        ico_src.unlink(missing_ok=True)
 
     if not made:
         fail("没有生成任何图标文件，请检查上方的跳过原因")

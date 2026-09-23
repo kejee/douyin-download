@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"
+     role="img" aria-labelledby="udIconTitle udIconDesc">
+  <title id="udIconTitle">UniversalDownloader</title>
+  <desc id="udIconDesc">品牌紫罗兰渐变底板上的白色下载符号：一支下落箭头与承接托盘。</desc>
+
+  <defs>
+    <!-- 底板主渐变：取自应用 UI 的 primary-gradient 变量 (#6366F1 → #A855F7 → #EC4899) -->
+    <!-- 注意：XML 注释内不允许出现双连字符，故此处不写 CSS 变量的两个短横线 -->
+    <linearGradient id="udPlateFill" x1="0" y1="0" x2="0.86" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="0.46" stop-color="#8B5CF6"/>
+      <stop offset="0.78" stop-color="#A855F7"/>
+      <stop offset="1" stop-color="#D946EF"/>
+    </linearGradient>
+
+    <!-- 顶部高光：赋予底板玻璃质感 -->
+    <linearGradient id="udPlateSheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="0.62" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- 底板投影：在浅色与深色桌面上都能拉开层次 -->
+    <filter id="udPlateShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24"
+                    flood-color="#1E1B4B" flood-opacity="0.38"/>
+    </filter>
+
+    <!-- 符号投影：让白色符号从底板上浮起 -->
+    <filter id="udGlyphShadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14"
+                    flood-color="#2E1065" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- 底板：824×824 内容区 + 100 四周安全边距（macOS 图标约定） -->
+  <g id="udPlate">
+    <rect id="udPlateBase" x="100" y="100" width="824" height="824" rx="185" ry="185"
+          fill="url(#udPlateFill)" filter="url(#udPlateShadow)"/>
+    <rect id="udPlateSheenLayer" x="100" y="100" width="824" height="824" rx="185" ry="185"
+          fill="url(#udPlateSheen)"/>
+  </g>
+
+  <!-- 符号：箭头笔画 62/1024，圆头端点与圆角拐点，视觉重量 1:1 均衡 -->
+  <g id="udGlyph" fill="none" stroke="#FFFFFF" stroke-width="62"
+     stroke-linecap="round" stroke-linejoin="round" filter="url(#udGlyphShadow)">
+    <path id="udGlyphArrow" d="M512 276 V572 M406 466 L512 572 L618 466"/>
+    <path id="udGlyphTray" d="M362 654 V708 Q362 748 402 748 H622 Q662 748 662 708 V654"/>
+  </g>
+</svg>

@@ -27,6 +27,8 @@ class QualityOption(BaseModel):
     label: str = Field(description="展示标签，如 1080P 高清 (1080x1920)")
     video_url: str = Field(description="该档画质视频轨直链")
     audio_url: str = Field(default="", description="对应音频轨直链")
+    video_backup_urls: List[str] = Field(default_factory=list, description="视频轨备用直链（换源重试用）")
+    audio_backup_urls: List[str] = Field(default_factory=list, description="音频轨备用直链（换源重试用）")
     filesize_bytes: int = Field(default=0, description="预估文件字节大小")
     filesize_str: str = Field(default="", description="预估文件可读大小，如 6.5 MB")
     width: int = 0
@@ -47,6 +49,8 @@ class VideoInfo(BaseModel):
     no_watermark_url: str = ""
     watermark_url: str = ""
     audio_url: str = ""  # DASH 音频轨直链 (B站等)
+    video_backup_urls: List[str] = Field(default_factory=list, description="视频轨备用直链（换源重试用）")
+    audio_backup_urls: List[str] = Field(default_factory=list, description="音频轨备用直链（换源重试用）")
     ratio: str = "720p"
     width: int = 0
     height: int = 0

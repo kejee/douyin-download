@@ -21,6 +21,7 @@ from extractors.base import (
     UserPostItem,
     UserProfileResponse,
 )
+from extractors.media_urls import stream_candidate_urls
 
 BILIBILI_DESKTOP_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -327,6 +328,8 @@ class BilibiliExtractor(BaseExtractor):
         audio_url = ""
         ratio = "720P 高清"
         quality_options: List[QualityOption] = []
+        video_backup_urls: List[str] = []
+        audio_backup_urls: List[str] = []
 
         # 优先使用官方 PlayURL 提取对应 target_cid 的 DASH 流
         async with httpx.AsyncClient(headers=custom_headers, timeout=self.timeout) as client:
@@ -340,15 +343,22 @@ class BilibiliExtractor(BaseExtractor):
                         # 最佳音频流
                         audio_streams = dash.get("audio", []) or dash.get("dolby", {}).get("audio", [])
                         if audio_streams:
-                            top_a = audio_streams[0]
-                            audio_url = top_a.get("baseUrl") or (top_a.get("backupUrl", [""])[0] if top_a.get("backupUrl") else "")
+                            # 官方 CDN 优先：B站会把部分流调度到第三方 PCDN 节点，
+                            # 那些节点按 IP+会话授权，实测会 403
+                            a_candidates = stream_candidate_urls(audio_streams[0])
+                            if a_candidates:
+                                audio_url = a_candidates[0]
+                                audio_backup_urls = a_candidates[1:]
 
                         # 所有视频清晰度
                         video_streams = dash.get("video", [])
                         seen_qids = set()
                         for v in video_streams:
                             qid = v.get("id", 64)
-                            v_url = v.get("baseUrl") or (v.get("backupUrl", [""])[0] if v.get("backupUrl") else "")
+                            v_candidates = stream_candidate_urls(v)
+                            if not v_candidates:
+                                continue
+                            v_url = v_candidates[0]
                             w = v.get("width") or 0
                             h = v.get("height") or 0
                             codecs = v.get("codecs", "H.264")
@@ -367,6 +377,8 @@ class BilibiliExtractor(BaseExtractor):
                                 label=label_text,
                                 video_url=v_url,
                                 audio_url=audio_url,
+                                video_backup_urls=v_candidates[1:],
+                                audio_backup_urls=audio_backup_urls,
                                 width=w,
                                 height=h,
                                 codec="H.264" if is_avc else codecs,
@@ -374,10 +386,14 @@ class BilibiliExtractor(BaseExtractor):
 
                         if quality_options:
                             video_url = quality_options[0].video_url
+                            video_backup_urls = list(quality_options[0].video_backup_urls)
                             ratio = quality_options[0].label.split("(")[0].strip()
                         elif video_streams:
                             top_v = video_streams[0]
-                            video_url = top_v.get("baseUrl") or (top_v.get("backupUrl", [""])[0] if top_v.get("backupUrl") else "")
+                            top_candidates = stream_candidate_urls(top_v)
+                            if top_candidates:
+                                video_url = top_candidates[0]
+                                video_backup_urls = top_candidates[1:]
                             q_id = top_v.get("id", 64)
                             ratio = QUALITY_MAP.get(q_id, "720P 高清")
             except Exception:
@@ -464,6 +480,8 @@ class BilibiliExtractor(BaseExtractor):
                 no_watermark_url=video_url,
                 watermark_url=video_url,
                 audio_url=audio_url,
+                video_backup_urls=video_backup_urls,
+                audio_backup_urls=audio_backup_urls,
                 ratio=ratio,
                 duration=target_duration,
                 qualities=quality_options,

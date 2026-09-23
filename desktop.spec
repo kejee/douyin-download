@@ -15,7 +15,7 @@ import tempfile
 
 block_cipher = None
 
-APP_VERSION = "2.3.1.0"
+APP_VERSION = "2.3.1.1"
 
 FFMPEG_EXE_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 

@@ -15,9 +15,14 @@ from downloader.paths import (
     load_local_dir,
     save_local_dir,
 )
-from downloader.http_util import download_headers
+from downloader.http_util import bilibili_cookie, download_headers
+from extractors.media_urls import build_download_candidates, host_of
 
 logger = logging.getLogger(__name__)
+
+
+class _SourceRejected(Exception):
+    """媒体源在响应头阶段就被拒（4xx/5xx），可换源重试"""
 
 # 下载归档根目录（不依赖进程 cwd；本模块导入期不做任何磁盘写入）
 DOWNLOAD_DIR = default_download_dir()
@@ -237,78 +242,107 @@ class ServerDownloadManager:
                 pass
 
     async def _download_direct_stream(self, task: ServerTask, video_url: str):
-        """直链流式落盘"""
-        headers = download_headers(video_url or task.direct_url)
+        """直链流式落盘（失败自动换源）"""
         temp_path = f"{task.save_path}.downloading"
-
-        async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(120.0, connect=10.0), follow_redirects=True) as client:
-            async with client.stream("GET", video_url) as resp:
-                if resp.status_code >= 400:
-                    raise RuntimeError(f"视频源响应异常: HTTP {resp.status_code}")
-
-                total = int(resp.headers.get("content-length", 0))
-                task.total_bytes = total
-                downloaded = 0
-
-                with open(temp_path, "wb") as f:
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        if task.status == "paused" or task.status == "canceled":
-                            raise asyncio.CancelledError()
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        task.downloaded_bytes = downloaded
-                        if total > 0:
-                            task.progress = min(99, int((downloaded / total) * 95))
-                            self._notify_listeners("task_progress", task.dict())
+        await self._download_track(
+            task, video_url, temp_path, label="媒体流", base_progress=0, span=95
+        )
 
         # 完成后原子重命名
         if os.path.exists(task.save_path):
             os.remove(task.save_path)
         os.rename(temp_path, task.save_path)
 
+    async def _download_track(
+        self,
+        task: ServerTask,
+        url: str,
+        dest_path: str,
+        label: str = "媒体流",
+        base_progress: int = 0,
+        span: int = 95,
+        backups: Optional[List[str]] = None,
+    ):
+        """下载单条轨道，被拒时按候选地址换源重试。
+
+        B站会把部分码率变体调度到第三方 PCDN 节点（*.mcdn.bilivideo.cn /
+        *.edge.mountaintoys.cn），这类节点按 IP + 会话授权、稳定性差，实测会
+        直接返回 403；官方 upos-* 镜像接受同一份签名路径（实测 6/6 可用）。
+        因此按「原地址 → 备份地址 → 官方镜像改写」逐个重试，并透传 SESSDATA，
+        避免登录态高码率流被判未授权。
+        """
+        candidates = build_download_candidates(url, backups)
+        last_error = ""
+        for index, candidate in enumerate(candidates):
+            if index:
+                logger.warning(
+                    f"[{task.id}] {label} 换源重试 {index + 1}/{len(candidates)} "
+                    f"-> {host_of(candidate)}（上次失败: {last_error}）"
+                )
+                task.progress = base_progress
+                self._notify_listeners("task_progress", task.dict())
+            headers = download_headers(candidate, cookie=bilibili_cookie(task.sessdata))
+            try:
+                await self._stream_to_file(
+                    task, candidate, headers, dest_path, base_progress, span
+                )
+                return
+            except _SourceRejected as exc:
+                last_error = str(exc)
+                continue
+        raise RuntimeError(
+            f"{label}全部候选地址均不可用（共 {len(candidates)} 个）: {last_error}"
+        )
+
+    async def _stream_to_file(
+        self,
+        task: ServerTask,
+        url: str,
+        headers: Dict[str, str],
+        dest_path: str,
+        base_progress: int,
+        span: int,
+    ):
+        timeout = httpx.Timeout(120.0, connect=10.0)
+        async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", url) as resp:
+                if resp.status_code >= 400:
+                    raise _SourceRejected(f"HTTP {resp.status_code}")
+
+                total = int(resp.headers.get("content-length", 0))
+                task.total_bytes = total
+                task.downloaded_bytes = 0
+
+                with open(dest_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        if task.status in ("paused", "canceled"):
+                            raise asyncio.CancelledError()
+                        f.write(chunk)
+                        task.downloaded_bytes += len(chunk)
+                        if total > 0:
+                            task.progress = min(
+                                99, base_progress + int((task.downloaded_bytes / total) * span)
+                            )
+                            self._notify_listeners("task_progress", task.dict())
+
     async def _download_and_mux_ffmpeg(self, task: ServerTask, video_url: str, audio_url: str):
-        """调用 FFmpeg 混流下载并直接保存至 NAS 目标目录"""
+        """下载音视频双轨并调用 FFmpeg 无损封装"""
         temp_v = f"{task.save_path}.temp_v.m4s"
         temp_a = f"{task.save_path}.temp_a.m4s"
-
-        headers = download_headers(video_url)
 
         # 1. 下载视频轨
         task.progress = 10
         self._notify_listeners("task_progress", task.dict())
-        async with httpx.AsyncClient(headers=headers, timeout=120.0, follow_redirects=True) as client:
-            async with client.stream("GET", video_url) as resp:
-                total_v = int(resp.headers.get("content-length", 0))
-                if resp.status_code >= 400:
-                    raise RuntimeError(f"视频轨响应异常: HTTP {resp.status_code}")
-                dl_v = 0
-                with open(temp_v, "wb") as f:
-                    async for chunk in resp.aiter_bytes(65536):
-                        if task.status in ("paused", "canceled"):
-                            raise asyncio.CancelledError()
-                        f.write(chunk)
-                        dl_v += len(chunk)
-                        if total_v > 0:
-                            task.progress = 10 + int((dl_v / total_v) * 45)
-                            self._notify_listeners("task_progress", task.dict())
+        await self._download_track(
+            task, video_url, temp_v, label="视频轨", base_progress=10, span=45
+        )
 
-            # 2. 下载音频轨
-            task.progress = 60
-            self._notify_listeners("task_progress", task.dict())
-            async with client.stream("GET", audio_url) as resp:
-                total_a = int(resp.headers.get("content-length", 0))
-                if resp.status_code >= 400:
-                    raise RuntimeError(f"音频轨响应异常: HTTP {resp.status_code}")
-                dl_a = 0
-                with open(temp_a, "wb") as f:
-                    async for chunk in resp.aiter_bytes(65536):
-                        if task.status in ("paused", "canceled"):
-                            raise asyncio.CancelledError()
-                        f.write(chunk)
-                        dl_a += len(chunk)
-                        if total_a > 0:
-                            task.progress = 60 + int((dl_a / total_a) * 25)
-                            self._notify_listeners("task_progress", task.dict())
+        # 2. 下载音频轨
+        task.progress = 60
+        self._notify_listeners("task_progress", task.dict())
+        await self._download_track(
+            task, audio_url, temp_a, label="音频轨", base_progress=60, span=25
+        )
 
         # 3. FFmpeg 极速封装落盘 (copy 流无损不转码)
         task.progress = 90

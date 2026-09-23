@@ -15,7 +15,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.3.1.0"
+APP_VERSION = "2.3.1.1"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",

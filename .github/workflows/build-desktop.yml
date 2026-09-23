@@ -42,8 +42,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install -r requirements-desktop.txt
 
       - name: Build Desktop Executable with PyInstaller
         run: |

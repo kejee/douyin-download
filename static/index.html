@@ -15,7 +15,7 @@
         rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.3.0.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.3.1.0">
 </head>
 
 <body>
@@ -38,6 +38,10 @@
                     <i class="fa-solid fa-fire text-gradient"></i> 赞助推荐
                 </a>
                 <div class="header-nav-desktop">
+                    <button class="nav-btn" id="openSaveDirBtn" title="设置保存位置"
+                        style="display: none;" onclick="chooseDownloadFolder()">
+                        <i class="fa-solid fa-folder-tree"></i> 保存位置
+                    </button>
                     <button class="nav-btn" id="openDisclaimerBtn" title="查看免责声明">
                         <i class="fa-solid fa-shield-halved"></i> 免责声明
                     </button>
@@ -215,7 +219,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.3.0.0</span>
+                    <span class="badge badge-version">v2.3.1.0</span>
                 </div>
             </div>
         </footer>
@@ -336,6 +340,19 @@
             </div>
             <span class="dest-path-tip" id="destPathTip" style="display: none;" title="NAS 服务端下载根路径">/downloads</span>
         </div>
+        <!-- 桌面客户端：本地保存位置（选择目录 / 打开目录） -->
+        <div class="task-destination-row desktop-save-bar" id="desktopSaveBar" style="display: none;">
+            <span class="dest-label"><i class="fa-solid fa-folder-open"></i> 保存到:</span>
+            <span class="desktop-save-path" id="desktopSavePath" title="当前保存目录">未设置</span>
+            <div class="dest-toggle-group">
+                <button type="button" class="btn-dest-toggle" onclick="chooseDownloadFolder()" title="选择保存目录">
+                    <i class="fa-solid fa-folder-tree"></i> 选择目录
+                </button>
+                <button type="button" class="btn-dest-toggle" onclick="openDownloadFolder()" title="在文件管理器中打开">
+                    <i class="fa-solid fa-arrow-up-right-from-square"></i> 打开目录
+                </button>
+            </div>
+        </div>
         <div class="task-manager-summary">
             <div class="task-stat-bar">
                 <div class="task-stat-item"><span class="dot dot-running"></span>进行: <b id="statRunning">0</b></div>
@@ -362,7 +379,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.3.0.0"></script>
+    <script src="/static/js/app.js?v=2.3.1.0"></script>
 </body>
 
 </html>

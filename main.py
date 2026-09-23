@@ -13,8 +13,9 @@ from pydantic import BaseModel
 import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
+from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.3.0.0"
+APP_VERSION = "2.3.1.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -98,18 +99,8 @@ async def proxy_download(
     if not safe_filename:
         safe_filename = "download"
 
-    # 根据 CDN 域名自动适配 Referer
-    referer = "https://www.douyin.com/"
-    if "xhscdn.com" in url or "xiaohongshu.com" in url:
-        referer = "https://www.xiaohongshu.com/"
-    elif "kuaishou.com" in url or "gifshow.com" in url or "yximgs.com" in url:
-        referer = "https://www.kuaishou.com/"
-    elif "pipix.com" in url or "snssdk.com" in url:
-        referer = "https://h5.pipix.com/"
-    elif "bilibili.com" in url or "bilivideo.cn" in url or "bilivideo.com" in url or "hdslb.com" in url:
-        referer = "https://www.bilibili.com/"
-    elif "twimg.com" in url or "twitter.com" in url or "x.com" in url:
-        referer = "https://twitter.com/"
+    # 根据 CDN 域名自动适配 Referer（与桌面端本地保存共用同一套规则）
+    referer = referer_for_url(url)
 
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
@@ -259,6 +250,9 @@ class ServerDownloadItem(BaseModel):
     platform: str = "media"
     page_num: Optional[int] = None
     sessdata: Optional[str] = None
+    filename: Optional[str] = None
+    subdir: Optional[str] = None
+    task_id: Optional[str] = None
 
 class ServerBatchDownloadRequest(BaseModel):
     tasks: List[ServerDownloadItem]
@@ -282,6 +276,10 @@ async def create_server_downloads(req: ServerBatchDownloadRequest):
             platform=item.platform,
             page_num=item.page_num,
             sessdata=item.sessdata,
+            channel="server",
+            filename=item.filename,
+            subdir=item.subdir,
+            task_id=item.task_id,
         )
         created_tasks.append(task)
     return {"success": True, "count": len(created_tasks), "tasks": created_tasks}
@@ -310,6 +308,57 @@ async def cancel_server_task(task_id: str):
 async def clear_server_tasks():
     count = server_downloader.clear_completed()
     return {"success": True, "cleared_count": count}
+
+# ==========================================================================
+# 桌面客户端：原生保存（选择目录 + Python 直接落盘，不经过 WebView 下载）
+# ==========================================================================
+
+class LocalDirRequest(BaseModel):
+    download_dir: str
+
+@app.get("/api/local/config")
+async def get_local_config():
+    """获取桌面端本地保存目录与可用空间"""
+    cfg = server_downloader.get_config()
+    return {
+        "download_dir": cfg["local_dir"],
+        "is_desktop": cfg["is_desktop"],
+        "free_space_gb": cfg["free_space_gb"],
+    }
+
+@app.post("/api/local/config")
+async def set_local_config(req: LocalDirRequest):
+    """设置桌面端本地保存目录（持久化，重启后仍然生效）"""
+    if not server_downloader.set_local_dir(req.download_dir):
+        raise HTTPException(status_code=400, detail="目录不存在或不可写")
+    return {"success": True, "download_dir": server_downloader.local_dir}
+
+@app.post("/api/local/download")
+async def create_local_downloads(req: ServerBatchDownloadRequest):
+    """提交下载任务到桌面端本地目录归档"""
+    created_tasks = []
+    for item in req.tasks:
+        task = server_downloader.add_task(
+            url=item.url,
+            direct_url=item.direct_url,
+            audio_url=item.audio_url,
+            title=item.title,
+            season_title=item.season_title,
+            platform=item.platform,
+            page_num=item.page_num,
+            sessdata=item.sessdata,
+            channel="local",
+            filename=item.filename,
+            subdir=item.subdir,
+            task_id=item.task_id,
+        )
+        created_tasks.append(task)
+    return {"success": True, "count": len(created_tasks), "tasks": created_tasks}
+
+@app.get("/api/tasks/events")
+async def task_events():
+    """全量任务事件流（服务端归档与桌面端本地保存共用）"""
+    return await server_events()
 
 @app.get("/api/server/events")
 async def server_events():

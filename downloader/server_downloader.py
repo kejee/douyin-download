@@ -8,12 +8,19 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 import httpx
 from extractors.router import UnifiedMediaRouter
+from downloader.paths import (
+    default_download_dir,
+    ensure_dir,
+    is_desktop_mode,
+    load_local_dir,
+    save_local_dir,
+)
+from downloader.http_util import download_headers
 
 logger = logging.getLogger(__name__)
 
-# 服务端存储根目录配置 (支持环境变量覆盖，适配 Docker / NAS / 桌面端)
-DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", os.path.join(os.getcwd(), "downloads"))
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# 下载归档根目录（不依赖进程 cwd；本模块导入期不做任何磁盘写入）
+DOWNLOAD_DIR = default_download_dir()
 
 class ServerTask(BaseModel):
     id: str
@@ -24,6 +31,7 @@ class ServerTask(BaseModel):
     direct_url: Optional[str] = None
     audio_url: Optional[str] = None
     sessdata: Optional[str] = None
+    channel: str = "server"  # server: NAS/服务端归档 | local: 桌面端本地保存
     status: str = "waiting"  # waiting | running | paused | success | error
     progress: int = 0
     total_bytes: int = 0
@@ -35,8 +43,12 @@ class ServerDownloadManager:
     """服务端/NAS/桌面端 统一异步下载与自动归档调度引擎"""
 
     def __init__(self, download_dir: str = DOWNLOAD_DIR, max_concurrent: int = 3):
-        self.download_dir = download_dir
+        self.server_dir = download_dir
+        self.local_dir = load_local_dir() if is_desktop_mode() else download_dir
         self.max_concurrent = max_concurrent
+        # 惰性建目录：失败不影响进程启动（历史坑：import 期 makedirs 导致双击崩溃）
+        ensure_dir(self.server_dir)
+        ensure_dir(self.local_dir)
         self.tasks: Dict[str, ServerTask] = {}
         self.task_controllers: Dict[str, asyncio.Event] = {}
         self.router = UnifiedMediaRouter()
@@ -46,16 +58,33 @@ class ServerDownloadManager:
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
     def get_config(self) -> Dict[str, Any]:
+        active_root = self.local_dir if is_desktop_mode() else self.server_dir
         return {
-            "download_dir": self.download_dir,
+            "download_dir": self.server_dir,
+            "server_dir": self.server_dir,
+            "local_dir": self.local_dir,
             "max_concurrent": self.max_concurrent,
             "is_nas_mode": bool(os.getenv("DOWNLOAD_DIR")),
-            "free_space_gb": self._get_free_space_gb(),
+            "is_desktop": is_desktop_mode(),
+            "free_space_gb": self._get_free_space_gb(active_root),
         }
 
-    def _get_free_space_gb(self) -> float:
+    def set_local_dir(self, path: str) -> bool:
+        """设置桌面端"存到当前设备"的目标目录（持久化到用户配置）"""
+        path = (path or "").strip()
+        if not path or not os.path.isdir(path):
+            return False
+        self.local_dir = path
+        save_local_dir(path)
+        logger.info(f"本地保存目录已切换为: {path}")
+        return True
+
+    def _root_for_channel(self, channel: str) -> str:
+        return self.local_dir if channel == "local" else self.server_dir
+
+    def _get_free_space_gb(self, path: str = "") -> float:
         try:
-            total, used, free = shutil.disk_usage(self.download_dir)
+            total, used, free = shutil.disk_usage(path or self.server_dir)
             return round(free / (1024 ** 3), 2)
         except Exception:
             return 0.0
@@ -64,8 +93,16 @@ class ServerDownloadManager:
         if not name:
             return "media"
         # 移除非法路径字符
-        clean = re.sub(r'[\r\n\\/:*?"<>|]+', '_', name)
-        return clean.strip(' ._')[:100]
+        clean = re.sub(r'[\r\n\\/:*?"<>|]+', '_', name).strip(' ._')
+        if not clean:
+            return "media"
+        if len(clean) <= 100:
+            return clean
+        # 超长时截断，但保留扩展名（否则 .mp4/.jpg 会被吃掉）
+        stem, dot, ext = clean.rpartition('.')
+        if dot and 0 < len(ext) <= 5:
+            return f"{stem[:100 - len(ext) - 1]}.{ext}"
+        return clean[:100]
 
     def add_task(
         self,
@@ -77,27 +114,46 @@ class ServerDownloadManager:
         platform: str = "media",
         page_num: Optional[int] = None,
         sessdata: Optional[str] = None,
+        channel: str = "server",
+        filename: Optional[str] = None,
+        subdir: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> ServerTask:
-        """根据合集名/平台自动归档路径并加入下载队列"""
+        """解析归档路径并加入下载队列。
+
+        路径规则:
+        1. 显式 filename 优先（桌面端沿用前端已算好的文件名，保留原扩展名）；
+        2. 合集/多P    -> {root}/{合集名}/P01_{标题}.mp4
+        3. 普通单作品  -> {root}/{平台}/{标题}.mp4（桌面端本地保存则平铺，不建平台子目录）
+        """
+        root = self._root_for_channel(channel)
         safe_title = self.sanitize_filename(title)
-        
-        # 自动归档子目录规则:
-        # 1. 若属于合集/多P -> /downloads/{合集名}/P01_{标题}.mp4
-        # 2. 若普通单视频 -> /downloads/{平台}/{标题}.mp4
-        if season_title:
-            folder_name = self.sanitize_filename(season_title)
-            target_folder = os.path.join(self.download_dir, folder_name)
+
+        if filename:
+            resolved = self.sanitize_filename(filename)
+        else:
             p_prefix = f"P{str(page_num).zfill(2)}_" if page_num else ""
-            filename = f"{p_prefix}{safe_title}.mp4" if not safe_title.endswith('.mp4') else safe_title
+            resolved = f"{p_prefix}{safe_title}.mp4"
+
+        if subdir:
+            folder_name = self.sanitize_filename(subdir)
+        elif season_title:
+            folder_name = self.sanitize_filename(season_title)
+        elif channel == "local":
+            folder_name = ""  # 用户已选定保存目录，直接平铺
         else:
             folder_name = self.sanitize_filename(platform)
-            target_folder = os.path.join(self.download_dir, folder_name)
-            filename = f"{safe_title}.mp4" if not safe_title.endswith('.mp4') else safe_title
 
-        os.makedirs(target_folder, exist_ok=True)
+        target_folder = os.path.join(root, folder_name) if folder_name else root
+        ensure_dir(target_folder)
+        filename = resolved
         save_path = os.path.join(target_folder, filename)
 
-        task_id = f"stask_{int(time.time() * 1000)}_{len(self.tasks) + 1}"
+        # 允许调用方（桌面端前端）指定任务 id，使 SSE 事件能与本地任务一一对应，
+        # 避免事件早于 HTTP 响应到达而产生重复条目
+        task_id = (task_id or "").strip() or f"stask_{int(time.time() * 1000)}_{len(self.tasks) + 1}"
+        if task_id in self.tasks:
+            task_id = f"{task_id}_{int(time.time() * 1000)}"
         task = ServerTask(
             id=task_id,
             title=title,
@@ -107,6 +163,7 @@ class ServerDownloadManager:
             direct_url=direct_url,
             audio_url=audio_url,
             sessdata=sessdata,
+            channel=channel,
             status="waiting",
             progress=0,
             created_at=time.time(),
@@ -153,20 +210,35 @@ class ServerDownloadManager:
                 task.progress = 100
                 self._notify_listeners("task_success", task.dict())
             except asyncio.CancelledError:
-                task.status = "paused"
-                self._notify_listeners("task_paused", task.dict())
+                self._cleanup_temp_files(task)
+                if task.status == "canceled":
+                    self._notify_listeners("task_canceled", task.dict())
+                else:
+                    task.status = "paused"
+                    self._notify_listeners("task_paused", task.dict())
             except Exception as e:
                 logger.exception(f"服务端下载任务异常: {task.id}")
+                self._cleanup_temp_files(task)
                 task.status = "error"
                 task.error = str(e)
                 self._notify_listeners("task_error", task.dict())
 
+    def _cleanup_temp_files(self, task: ServerTask):
+        """清理中断/失败残留的分片临时文件"""
+        for temp_f in (
+            f"{task.save_path}.downloading",
+            f"{task.save_path}.temp_v.m4s",
+            f"{task.save_path}.temp_a.m4s",
+        ):
+            try:
+                if os.path.exists(temp_f):
+                    os.remove(temp_f)
+            except OSError:
+                pass
+
     async def _download_direct_stream(self, task: ServerTask, video_url: str):
         """直链流式落盘"""
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com/",
-        }
+        headers = download_headers(video_url or task.direct_url)
         temp_path = f"{task.save_path}.downloading"
 
         async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(120.0, connect=10.0), follow_redirects=True) as client:
@@ -199,10 +271,7 @@ class ServerDownloadManager:
         temp_v = f"{task.save_path}.temp_v.m4s"
         temp_a = f"{task.save_path}.temp_a.m4s"
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com/",
-        }
+        headers = download_headers(video_url)
 
         # 1. 下载视频轨
         task.progress = 10
@@ -210,9 +279,13 @@ class ServerDownloadManager:
         async with httpx.AsyncClient(headers=headers, timeout=120.0, follow_redirects=True) as client:
             async with client.stream("GET", video_url) as resp:
                 total_v = int(resp.headers.get("content-length", 0))
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"视频轨响应异常: HTTP {resp.status_code}")
                 dl_v = 0
                 with open(temp_v, "wb") as f:
                     async for chunk in resp.aiter_bytes(65536):
+                        if task.status in ("paused", "canceled"):
+                            raise asyncio.CancelledError()
                         f.write(chunk)
                         dl_v += len(chunk)
                         if total_v > 0:
@@ -224,9 +297,13 @@ class ServerDownloadManager:
             self._notify_listeners("task_progress", task.dict())
             async with client.stream("GET", audio_url) as resp:
                 total_a = int(resp.headers.get("content-length", 0))
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"音频轨响应异常: HTTP {resp.status_code}")
                 dl_a = 0
                 with open(temp_a, "wb") as f:
                     async for chunk in resp.aiter_bytes(65536):
+                        if task.status in ("paused", "canceled"):
+                            raise asyncio.CancelledError()
                         f.write(chunk)
                         dl_a += len(chunk)
                         if total_a > 0:

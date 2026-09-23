@@ -1,0 +1,9 @@
+# 桌面客户端（PyInstaller）构建专用依赖
+#
+# 说明：Docker / 服务端部署请继续使用 requirements.txt，
+# 本文件多出的两个包仅用于把客户端打包成原生应用，无需进入镜像。
+#   - pyinstaller     : 打包工具
+#   - imageio-ffmpeg  : 提供各平台静态 ffmpeg 二进制，供 desktop.spec 内嵌进客户端
+-r requirements.txt
+pyinstaller>=6.0.0
+imageio-ffmpeg>=0.5.0

@@ -515,7 +515,7 @@ function renderResult(data) {
     } else if (type === "images") {
         // 图集展示 (优雅平铺网格，绝不重叠)
         const galleryItems = images.map((imgUrl, idx) => `
-            <div class="gallery-item" title="点击新窗口查看原图" onclick="window.open('${imgUrl}', '_blank')">
+            <div class="gallery-item" title="点击查看高清原图" onclick="openImagePreview('${imgUrl}')">
                 <img src="${imgUrl}" alt="图片 ${idx + 1}" loading="lazy" referrerpolicy="no-referrer">
                 <div class="gallery-item-action" onclick="event.stopPropagation()">
                     <span class="gallery-idx">#${idx + 1}</span>
@@ -800,6 +800,7 @@ function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
         title: `P${pageNum}: ${epTitle || `第${pageNum}集`}`,
         filename: safeEpTitle,
         share_url: shareUrl,
+        seasonTitle: seasonTitle,
         status: 'waiting',
         progress: 0,
         errorMsg: null,
@@ -838,6 +839,8 @@ window.isTaskQueuePaused = false;
 window.taskTargetFolder = null; // 本地文件夹 Handle
 window.downloadDestination = localStorage.getItem("download_destination") || "local";
 window.serverConfig = null;
+window.isDesktop = false;      // 后端判定为桌面客户端
+window.localDir = "";          // 桌面端本地保存目录
 
 // 设置下载目的地 (local: 本地浏览器, server: NAS/服务端归档)
 function setDownloadDestination(mode) {
@@ -864,6 +867,92 @@ function setDownloadDestination(mode) {
     }
 }
 
+// ==========================================================================
+// 桌面客户端：原生保存位置（选择目录 / 打开目录 / 持久化）
+// ==========================================================================
+function hasNativeApi() {
+    return !!(window.pywebview && window.pywebview.api);
+}
+
+window.addEventListener("pywebviewready", () => {
+    applyDesktopMode();
+    refreshLocalDir();
+});
+
+async function refreshLocalDir() {
+    try {
+        const resp = await fetch("/api/local/config");
+        if (!resp.ok) return;
+        const cfg = await resp.json();
+        window.localDir = cfg.download_dir || "";
+        updateLocalDirLabel();
+    } catch (e) {
+        console.warn("获取本地保存目录失败:", e);
+    }
+}
+
+function updateLocalDirLabel() {
+    const pathEl = document.getElementById("desktopSavePath");
+    if (pathEl) pathEl.textContent = window.localDir || "未设置";
+    const navBtn = document.getElementById("openSaveDirBtn");
+    if (navBtn) navBtn.title = `保存位置：${window.localDir || "未设置"}（点击更改）`;
+}
+
+function applyDesktopMode() {
+    if (!window.isDesktop) return;
+    // 桌面端恒为"存到当前设备"（由 Python 直接落盘到用户选定目录）
+    window.downloadDestination = "local";
+    localStorage.setItem("download_destination", "local");
+
+    const bar = document.getElementById("desktopSaveBar");
+    if (bar) bar.style.display = "flex";
+    const destRow = document.getElementById("taskDestinationRow");
+    if (destRow) destRow.style.display = "none";
+    const navBtn = document.getElementById("openSaveDirBtn");
+    if (navBtn) navBtn.style.display = "inline-flex";
+    updateLocalDirLabel();
+}
+
+async function chooseDownloadFolder() {
+    if (!hasNativeApi()) {
+        showToast("目录选择仅在桌面客户端中可用", "error");
+        return;
+    }
+    let picked = "";
+    try {
+        picked = await window.pywebview.api.choose_folder(window.localDir || "");
+    } catch (e) {
+        showToast("打开目录选择器失败: " + e.message, "error");
+        return;
+    }
+    if (!picked) return;
+    try {
+        const resp = await fetch("/api/local/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ download_dir: picked }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.success) {
+            showToast(data.detail || "保存目录设置失败", "error");
+            return;
+        }
+        window.localDir = data.download_dir;
+        updateLocalDirLabel();
+        showToast("保存位置已更新：" + data.download_dir, "success");
+    } catch (e) {
+        showToast("网络请求异常: " + e.message, "error");
+    }
+}
+
+async function openDownloadFolder() {
+    if (!hasNativeApi()) {
+        showToast("请在桌面客户端中使用此功能", "error");
+        return;
+    }
+    await window.pywebview.api.open_path(window.localDir || "");
+}
+
 // 初始化服务端/NAS配置与SSE
 async function initServerArchiving() {
     try {
@@ -871,11 +960,14 @@ async function initServerArchiving() {
         if (resp.ok) {
             const cfg = await resp.json();
             window.serverConfig = cfg;
+            window.isDesktop = !!cfg.is_desktop;
             const tipEl = document.getElementById("destPathTip");
             if (tipEl && cfg.download_dir) {
                 tipEl.textContent = cfg.download_dir;
             }
-            if (cfg.is_nas_mode && !localStorage.getItem("download_destination")) {
+            if (cfg.is_desktop) {
+                applyDesktopMode();
+            } else if (cfg.is_nas_mode && !localStorage.getItem("download_destination")) {
                 setDownloadDestination("server");
             } else {
                 setDownloadDestination(window.downloadDestination);
@@ -1037,6 +1129,14 @@ function renderTaskManagerUI() {
 function scheduleTaskQueue() {
     if (window.isTaskQueuePaused) return;
 
+    // 桌面端：并发与排队统一由后端 Python 调度，前端只负责提交
+    if (window.isDesktop) {
+        window.taskQueue
+            .filter(t => t.status === 'waiting' && !t.submitted)
+            .forEach(t => runSingleTask(t));
+        return;
+    }
+
     const runningTasks = window.taskQueue.filter(t => t.status === 'running');
     if (runningTasks.length >= window.maxConcurrentTasks) return;
 
@@ -1049,9 +1149,56 @@ function scheduleTaskQueue() {
 }
 window.processTaskQueue = scheduleTaskQueue;
 
+// 桌面端：把任务交给后端原生落盘（进度由 SSE 回填）
+async function submitTaskToBackend(task) {
+    task.submitted = true;
+    try {
+        const payload = {
+            tasks: [{
+                task_id: task.id,
+                title: task.title || task.filename || "视频",
+                filename: task.filename || null,
+                direct_url: task.directUrl || task.videoUrl || null,
+                audio_url: task.audioUrl || null,
+                url: task.share_url || null,
+                season_title: task.seasonTitle || null,
+                platform: task.platform || "media",
+                page_num: task.pageNum || null,
+                sessdata: getBiliSessdata() || null,
+            }],
+        };
+        const resp = await fetch("/api/local/download", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.success || !data.tasks || !data.tasks.length) {
+            throw new Error(data.detail || "本地保存任务提交失败");
+        }
+        task.serverSide = true;
+        task.status = "waiting";
+        task.progress = 2;
+    } catch (err) {
+        task.submitted = false;
+        task.status = "error";
+        task.errorMsg = err.message || "提交失败";
+    } finally {
+        renderTaskManagerUI();
+    }
+}
+
 // 执行单个下载任务
 async function runSingleTask(task) {
     if (!task || task.status !== 'waiting') return;
+    if (task.submitted) return;
+
+    // 桌面客户端：交由后端 Python 原生落盘，杜绝 WebView 下载把界面顶掉
+    if (window.isDesktop) {
+        await submitTaskToBackend(task);
+        return;
+    }
+
     task.status = 'running';
     task.progress = 10;
     renderTaskManagerUI();
@@ -1147,6 +1294,12 @@ async function runSingleTask(task) {
 function pauseTask(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
     if (!task) return;
+    if (task.serverSide) {
+        fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/pause`, { method: "POST" }).catch(() => {});
+        task.status = 'paused';
+        renderTaskManagerUI();
+        return;
+    }
     if (task.status === 'running' && task.abortCtrl) {
         task.abortCtrl.abort();
     }
@@ -1158,6 +1311,12 @@ function pauseTask(taskId) {
 function resumeTask(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
     if (!task) return;
+    if (task.serverSide) {
+        fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" }).catch(() => {});
+        task.status = 'waiting';
+        renderTaskManagerUI();
+        return;
+    }
     task.status = 'waiting';
     renderTaskManagerUI();
     scheduleTaskQueue();
@@ -1166,6 +1325,13 @@ function resumeTask(taskId) {
 function retryTask(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
     if (!task) return;
+    if (task.serverSide) {
+        fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" }).catch(() => {});
+        task.status = 'waiting';
+        task.progress = 0;
+        renderTaskManagerUI();
+        return;
+    }
     task.status = 'waiting';
     task.progress = 0;
     renderTaskManagerUI();
@@ -1176,6 +1342,13 @@ function retryTask(taskId) {
 function pauseAllTasks() {
     window.isTaskQueuePaused = true;
     window.taskQueue.forEach(t => {
+        if (t.serverSide) {
+            if (t.status === 'running' || t.status === 'waiting') {
+                fetch(`/api/server/tasks/${encodeURIComponent(t.id)}/pause`, { method: "POST" }).catch(() => {});
+                t.status = 'paused';
+            }
+            return;
+        }
         if (t.status === 'running' && t.abortCtrl) {
             t.abortCtrl.abort();
         }
@@ -1190,9 +1363,11 @@ function pauseAllTasks() {
 function resumeAllTasks() {
     window.isTaskQueuePaused = false;
     window.taskQueue.forEach(t => {
-        if (t.status === 'paused') {
-            t.status = 'waiting';
+        if (t.status !== 'paused') return;
+        if (t.serverSide) {
+            fetch(`/api/server/tasks/${encodeURIComponent(t.id)}/resume`, { method: "POST" }).catch(() => {});
         }
+        t.status = 'waiting';
     });
     renderTaskManagerUI();
     scheduleTaskQueue();
@@ -1200,6 +1375,7 @@ function resumeAllTasks() {
 }
 
 function clearCompletedTasks() {
+    fetch("/api/server/tasks/clear", { method: "POST" }).catch(() => {});
     window.taskQueue = window.taskQueue.filter(t => t.status !== 'success');
     renderTaskManagerUI();
     showToast("已清空全部已完成任务", "info");
@@ -1255,6 +1431,7 @@ async function downloadAllEpisodes(mode = 'direct') {
             title: `P${pageStr} ${ep.title || `第${ep.page}集`}`,
             filename: `${safeSeasonTitle}_P${pageStr}_${epCleanTitle}.mp4`,
             share_url: ep.share_url,
+            seasonTitle: seasonTitle,
             status: 'waiting',
             progress: 0,
             errorMsg: '',
@@ -1844,6 +2021,63 @@ function parseAndOpenMedia(url) {
         parseBtn.click();
     }
 }
+
+// ==========================================================================
+// 应用内原图预览（灯箱）
+// 说明：桌面客户端的 WebView 里 window.open 不是"开新窗口"，而是把主框架
+// 导航到目标 URL —— 整个操作界面会被一张图片顶掉且无法返回，故改为应用内预览。
+// ==========================================================================
+function openImagePreview(url) {
+    if (!url) return;
+    let box = document.getElementById("imagePreviewBox");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "imagePreviewBox";
+        box.className = "image-preview-overlay";
+        box.innerHTML = `
+            <img id="imagePreviewImg" alt="高清原图预览">
+            <div class="image-preview-bar">
+                <span class="image-preview-tip">点击图片任意处关闭 · Esc 退出</span>
+                <button type="button" class="btn-secondary-sm" id="imagePreviewSaveBtn">
+                    <i class="fa-solid fa-download"></i> 保存这张
+                </button>
+            </div>
+        `;
+        box.addEventListener("click", (e) => {
+            if (e.target && e.target.id === "imagePreviewSaveBtn") return;
+            closeImagePreview();
+        });
+        document.body.appendChild(box);
+        const saveBtn = box.querySelector("#imagePreviewSaveBtn");
+        if (saveBtn) saveBtn.addEventListener("click", saveImageFromPreview);
+    }
+    const img = document.getElementById("imagePreviewImg");
+    if (img) img.src = url;
+    window.currentPreviewUrl = url;
+    box.style.display = "flex";
+}
+
+function closeImagePreview() {
+    const box = document.getElementById("imagePreviewBox");
+    if (box) box.style.display = "none";
+    const img = document.getElementById("imagePreviewImg");
+    if (img) img.src = "";
+    window.currentPreviewUrl = null;
+}
+
+function saveImageFromPreview() {
+    const url = window.currentPreviewUrl;
+    if (!url) return;
+    let name = decodeURIComponent((url.split("?")[0].split("/").pop() || "image.jpg"));
+    if (!/\.[a-zA-Z0-9]{3,4}$/.test(name)) name += ".jpg";
+    triggerDownload(url, name);
+    closeImagePreview();
+    showToast("已加入下载任务", "success");
+}
+
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeImagePreview();
+});
 
 // 页面初始化
 document.addEventListener("DOMContentLoaded", () => {

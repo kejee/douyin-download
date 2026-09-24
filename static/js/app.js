@@ -456,11 +456,14 @@ function renderResult(data) {
 
         const audioUrl = video.audio_url || (music && music.url ? music.url : "");
 
-        // 视频播放源：B站等音视频分离流走后端实时混流流式代理 (带声音且 100% 兼容 iOS/Safari)
+        // 视频播放源
+        // B站是 DASH 双轨（音视频分离），必须由后端混流后才能播。
+        // 注意：**不能**把 ffmpeg 实时管道流直接喂给 <video> —— 桌面端是 WKWebView，
+        // 其播放内核 AVFoundation 只接受可寻址（Range/206）资源，管道流一律判为
+        // 不可播放（实测 isPlayable=ERR(Operation Stopped)，表现就是预览区黑屏）。
+        // 所以改为「点击 -> 后端混流成缓存文件 -> 以文件方式播放」，详见 preview.py。
         const isBiliStream = isBilibili && audioUrl;
-        const previewSrc = isBiliStream
-            ? `/api/stream/mux?video_url=${encodeURIComponent(noWmUrl)}&audio_url=${encodeURIComponent(audioUrl)}&inline=true`
-            : noWmUrl;
+        const previewSrc = isBiliStream ? "" : noWmUrl;
 
         const durStr = video.duration ? formatDuration(video.duration) : "";
 
@@ -489,6 +492,13 @@ function renderResult(data) {
                     referrerpolicy="no-referrer"
                     onloadedmetadata="onVideoMetadataLoaded(this)"
                 ></video>
+                ${isBiliStream ? `
+                <button type="button" class="preview-prepare-overlay" id="previewOverlay" onclick="startPreviewPrepare()">
+                    <span class="preview-play-btn"><i class="fa-solid fa-play"></i></span>
+                    <span class="preview-prepare-text" id="previewPrepareText">点击准备预览</span>
+                    <span class="preview-prepare-hint">点击后先在本机混流为完整文件（可拖动进度条、可重播）</span>
+                    <span class="preview-prepare-track"><span class="preview-prepare-bar" id="previewPrepareBar"></span></span>
+                </button>` : ''}
             </div>
         `;
 
@@ -503,6 +513,13 @@ function renderResult(data) {
             registerUrlBackups(q.video_url, q.video_backup_urls);
             registerUrlBackups(q.audio_url, q.audio_backup_urls);
         });
+
+        // B站双轨预览的入口参数（点击「准备预览」时才真正开始混流）
+        // 令牌自增用于作废上一次解析遗留的轮询，避免切视频后旧任务把新播放器改掉
+        window.pendingPreview = isBiliStream
+            ? { videoUrl: noWmUrl, audioUrl: audioUrl, title: cleanTitle }
+            : null;
+        window.previewJobToken = (window.previewJobToken || 0) + 1;
 
         const primaryBtnClick = isBilibili && audioUrl
             ? `triggerMuxDownload('${defaultQ ? defaultQ.video_url : noWmUrl}', '${defaultQ ? defaultQ.audio_url : audioUrl}', '${cleanTitle}_${defaultQName}.mp4')`
@@ -815,9 +832,95 @@ async function switchEpisode(shareUrl, pageNum) {
     }
 }
 
+// ==========================================================================
+// B站双轨预览：点击后由后端把音视频混流成**本地缓存文件**，再交给 <video> 播放
+//
+// 为什么不能边下边播：桌面端是 WKWebView，播放内核 AVFoundation 只接受可寻址
+// （Range/206）的媒体资源；ffmpeg 实时管道流（chunked、无 Content-Length、不实现
+// Range）会被直接判为不可播放，表现就是预览区黑屏 + 划掉的播放图标。
+// 详见 downloader/preview.py 里的实测数据。
+// 改为落盘缓存后顺带的好处：可拖动进度条、可重播、第二次打开秒开。
+// ==========================================================================
+function nextFrame() {
+    return new Promise(resolve => {
+        if (typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(() => setTimeout(resolve, 0));
+        } else {
+            setTimeout(resolve, 16);
+        }
+    });
+}
+
+async function startPreviewPrepare() {
+    const pending = window.pendingPreview;
+    const overlay = document.getElementById("previewOverlay");
+    const player = document.getElementById("mainVideoPlayer");
+    if (!pending || !overlay || !player) return;
+    if (overlay.classList.contains("is-busy")) return;   // 防重复点击
+
+    const token = ++window.previewJobToken;
+    const textEl = document.getElementById("previewPrepareText");
+    const barEl = document.getElementById("previewPrepareBar");
+    const iconEl = overlay.querySelector(".preview-play-btn i");
+    const hintEl = overlay.querySelector(".preview-prepare-hint");
+    const setText = s => { if (textEl) textEl.textContent = s; };
+    const setBar = p => { if (barEl) barEl.style.width = `${Math.max(0, Math.min(100, p))}%`; };
+
+    // 先把「准备中」画出来，否则请求期间用户看不到任何反馈
+    overlay.classList.add("is-busy");
+    overlay.classList.remove("is-error");
+    if (iconEl) iconEl.className = "fa-solid fa-spinner fa-spin";
+    setText("正在本机准备预览…");
+    setBar(0);
+    await nextFrame();
+
+    const attach = (key) => {
+        if (token !== window.previewJobToken) return;    // 已切换到别的视频
+        player.src = `/api/preview/${encodeURIComponent(key)}/stream`;
+        player.load();
+        overlay.style.display = "none";
+        player.play().catch(() => {});                    // 点击即手势，通常允许播放
+    };
+
+    try {
+        const resp = await fetch("/api/preview/prepare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                video_url: pending.videoUrl,
+                audio_url: pending.audioUrl || null,
+                title: pending.title || "",
+            }),
+        });
+        if (!resp.ok) throw new Error(`预览准备请求失败 (${resp.status})`);
+        const info = await resp.json();
+        if (info.ready) { attach(info.key); return; }
+
+        const key = info.key;
+        const deadline = Date.now() + 8 * 60 * 1000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 800));
+            if (token !== window.previewJobToken) return;
+            const st = await (await fetch(`/api/preview/${encodeURIComponent(key)}/status`)).json();
+            if (st.ready) { attach(key); return; }
+            if (st.status === "error") throw new Error(st.error || "混流失败");
+            setBar(st.progress || 0);
+            setText(`正在本机准备预览… ${st.progress || 0}%`);
+        }
+        throw new Error("准备超时");
+    } catch (e) {
+        if (token !== window.previewJobToken) return;
+        console.warn("准备预览失败:", e);
+        overlay.classList.remove("is-busy");
+        overlay.classList.add("is-error");
+        if (iconEl) iconEl.className = "fa-solid fa-triangle-exclamation";
+        setText("预览准备失败");
+        if (hintEl) hintEl.textContent = `${e.message || "未知原因"}；可直接点击下方按钮下载`;
+    }
+}
+
 // 视频元数据加载完成后自适应比例
-function onVideoMetadataLoaded(videoEl) {
-    if (!videoEl) return;
+function onVideoMetadataLoaded(videoEl) {    if (!videoEl) return;
     const container = videoEl.closest('.media-preview-container');
     const layout = videoEl.closest('.result-layout');
     if (!container) return;
@@ -1148,6 +1251,8 @@ async function initServerArchiving() {
             try {
                 const msg = JSON.parse(e.data);
                 const { event, data } = msg;
+                // 预览缓存任务（channel=preview）只在预览区呈现，不进任务列表
+                if (data && data.channel === "preview") return;
                 if (data && data.id) {
                     const localTask = window.taskQueue.find(t => t.id === data.id);
                     if (localTask) {
@@ -1327,6 +1432,11 @@ function renderTaskManagerUI() {
         else if (t.status === "paused") { statusLabel = "已暂停"; statusClass = "status-paused"; }
         else if (t.status === "success") { statusLabel = "已完成"; statusClass = "status-success"; }
         else if (t.status === "error") { statusLabel = "失败"; statusClass = "status-error"; }
+        else if (t.status === "canceled") { statusLabel = "已取消"; statusClass = "status-canceled"; }
+
+        // 终止态（完成/失败/已取消）的任务只保留「移除」，不再出现暂停/继续
+        const isActive = t.status === 'running' || t.status === 'waiting' || t.status === 'paused';
+        const canRemove = t.status !== 'running';
 
         return `
             <div class="task-item-card is-${t.status}" id="task_card_${t.id}">
@@ -1351,6 +1461,14 @@ function renderTaskManagerUI() {
                             <button class="btn-task-action" data-task-action="reveal" data-task-id="${t.id}" title="在访达中显示此文件">
                                 <i class="fa-solid fa-folder-open"></i>
                             </button>` : ''}
+                            ${isActive ? `
+                            <button class="btn-task-action is-danger" data-task-action="cancel" data-task-id="${t.id}" title="取消此任务（已下载的分片会丢弃）">
+                                <i class="fa-solid fa-xmark"></i>
+                            </button>` : ''}
+                            ${!isActive && canRemove ? `
+                            <button class="btn-task-action" data-task-action="remove" data-task-id="${t.id}" title="从列表移除">
+                                <i class="fa-solid fa-trash-can"></i>
+                            </button>` : ''}
                         </div>
                     </div>
                 </div>
@@ -1362,23 +1480,41 @@ function renderTaskManagerUI() {
     }).join("");
 }
 
-// 任务卡片上的操作按钮：统一用 pointerdown 事件委派。
-// 1) pointerdown 在按下瞬间触发，不要求 mouseup 落在同一节点，天然免疫重渲染；
-// 2) 容器 #taskManagerList 自身从不被重建，监听器一次注册永久有效。
+// 任务卡片上的操作按钮：事件委派。
+// 1) 主路径 pointerdown：按下瞬间触发，不要求 mouseup 落在同一节点，天然免疫重渲染；
+// 2) click 只作兜底（键盘 Enter / 不派发指针事件的旧内核）—— 用 WeakSet 记住同一次
+//    按压已由 pointerdown 处理过的按钮，避免一次点击执行两次；
+// 3) 监听器绑在永不重建的 #taskManagerList 上，一次注册永久有效。
 (function bindTaskActionDelegation() {
     const listEl = document.getElementById("taskManagerList");
     if (!listEl) return;
-    listEl.addEventListener("pointerdown", (e) => {
-        const btn = e.target && e.target.closest ? e.target.closest("[data-task-action]") : null;
-        if (!btn) return;
-        if (e.pointerType === "mouse" && e.button !== 0) return;
-        e.stopPropagation();
+    const handledByPointer = new WeakSet();
+
+    const runAction = (btn) => {
         const action = btn.dataset.taskAction;
         const taskId = btn.dataset.taskId;
         if (action === "pause") pauseTask(taskId);
         else if (action === "resume") resumeTask(taskId);
         else if (action === "retry") retryTask(taskId);
         else if (action === "reveal") revealTaskFile(taskId);
+        else if (action === "cancel") cancelTask(taskId);
+        else if (action === "remove") removeTask(taskId);
+    };
+
+    listEl.addEventListener("pointerdown", (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest("[data-task-action]") : null;
+        if (!btn) return;
+        if (e.pointerType === "mouse" && e.button !== 0) return;
+        e.stopPropagation();
+        handledByPointer.add(btn);
+        runAction(btn);
+    });
+
+    listEl.addEventListener("click", (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest("[data-task-action]") : null;
+        if (!btn || handledByPointer.has(btn)) return;
+        e.stopPropagation();
+        runAction(btn);
     });
 })();
 
@@ -1561,7 +1697,8 @@ async function runSingleTask(task) {
         renderTaskManagerUI();
     } catch (err) {
         if (err.name === 'AbortError') {
-            task.status = 'paused';
+            // 主动取消是终止态，不能被中断异常改回「已暂停」
+            if (task.status !== 'canceled') task.status = 'paused';
         } else {
             task.status = 'error';
             task.errorMsg = err.message || "下载失败";
@@ -1671,6 +1808,82 @@ async function retryTask(taskId) {
     task.progress = 0;
     renderTaskManagerUI();
     scheduleTaskQueue();
+}
+
+// 取消单个任务。
+// 与「暂停」的区别：取消是终止态，后端会**丢弃已下载的分片**（暂停则保留分片可续传），
+// 所以这里在 toast 里说明清楚，避免误以为还能续。
+async function cancelTask(taskId) {
+    const task = window.taskQueue.find(t => t.id === taskId);
+    if (!task) return;
+    if (!['running', 'waiting', 'paused'].includes(task.status)) return;
+
+    if (task.serverSide) {
+        const wasActive = task.status !== 'waiting';
+        task.status = 'canceled';
+        task.pendingPause = false;
+        renderTaskManagerUI();
+        try {
+            const resp = await fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || data.success === false) await syncTaskStatusFromServer(taskId);
+        } catch (e) {
+            console.warn("取消失败:", e);
+            showToast("取消请求失败，请重试", "error");
+            return;
+        }
+        showToast(wasActive ? "已取消，已下载的分片已丢弃" : "已取消该任务", "info");
+        return;
+    }
+
+    // 浏览器直连下载的任务：中断请求并清理
+    if (task.abortCtrl) {
+        task.abortCtrl.abort();
+        task.abortCtrl = null;
+    }
+    task.status = 'canceled';
+    renderTaskManagerUI();
+    showToast("已取消该任务", "info");
+}
+
+// 从列表移除一个终止态任务（不影响后端已完成任务的记录，仅前端清理）
+function removeTask(taskId) {
+    const task = window.taskQueue.find(t => t.id === taskId);
+    if (!task) return;
+    if (task.status === 'running') return;          // 运行中的任务请先取消
+    window.taskQueue = window.taskQueue.filter(t => t.id !== taskId);
+    renderTaskManagerUI();
+}
+
+// 取消全部：把所有活动任务（等待/下载中/已暂停）一次性取消
+async function cancelAllTasks() {
+    const targets = window.taskQueue.filter(t => ['running', 'waiting', 'paused'].includes(t.status));
+    if (!targets.length) {
+        showToast("当前没有进行中的任务", "info");
+        return;
+    }
+    window.isTaskQueuePaused = false;
+
+    const jobs = targets.map(t => {
+        if (t.serverSide) {
+            t.status = 'canceled';
+            t.pendingPause = false;
+            return fetch(`/api/server/tasks/${encodeURIComponent(t.id)}/cancel`, { method: "POST" })
+                .then(r => r.json().catch(() => ({})))
+                .then(d => { if (!d || d.success === false) return syncTaskStatusFromServer(t.id); })
+                .catch(() => {});
+        }
+        if (t.abortCtrl) {
+            t.abortCtrl.abort();
+            t.abortCtrl = null;
+        }
+        t.status = 'canceled';
+        return Promise.resolve();
+    });
+
+    renderTaskManagerUI();
+    await Promise.all(jobs);
+    showToast(`已取消 ${targets.length} 个任务`, "info");
 }
 
 // 在访达/资源管理器中定位已下载的文件（只对原生落盘的任务有意义）
@@ -1963,12 +2176,35 @@ function onQualitySelectChange(index) {
         };
     }
 
-    // 同步更新网页播放器
+    // 同步更新网页播放器：切画质等于换了另一组直链，预览缓存要跟着换
+    // （B站双轨必须重新走「落盘混流 -> 文件播放」，不能直接喂管道流）
     const player = document.getElementById("mainVideoPlayer");
     if (player && q.video_url) {
-        if (isBilibili && q.audio_url) {
-            player.src = `/api/stream/mux?video_url=${encodeURIComponent(q.video_url)}&audio_url=${encodeURIComponent(q.audio_url)}&inline=true`;
+        const bilisTream = isBilibili && q.audio_url;
+        window.pendingPreview = bilisTream
+            ? { videoUrl: q.video_url, audioUrl: q.audio_url, title: cleanTitle }
+            : null;
+        window.previewJobToken = (window.previewJobToken || 0) + 1;   // 作废上一次轮询
+
+        const overlay = document.getElementById("previewOverlay");
+        const iconEl = overlay ? overlay.querySelector(".preview-play-btn i") : null;
+        const textEl = document.getElementById("previewPrepareText");
+        const barEl = document.getElementById("previewPrepareBar");
+        const hintEl = overlay ? overlay.querySelector(".preview-prepare-hint") : null;
+
+        if (bilisTream) {
+            player.removeAttribute("src");
+            player.load();
+            if (overlay) {
+                overlay.style.display = "flex";
+                overlay.classList.remove("is-busy", "is-error");
+                if (iconEl) iconEl.className = "fa-solid fa-play";
+                if (textEl) textEl.textContent = "点击准备预览";
+                if (hintEl) hintEl.textContent = "点击后先在本机混流为完整文件（可拖动进度条、可重播）";
+                if (barEl) barEl.style.width = "0%";
+            }
         } else {
+            if (overlay) overlay.style.display = "none";
             player.src = q.video_url;
         }
     }

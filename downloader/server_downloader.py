@@ -17,6 +17,7 @@ from downloader.paths import (
     save_local_dir,
 )
 from downloader.http_util import bilibili_cookie, download_headers
+from downloader.preview import preview_dir
 from extractors.media_urls import build_download_candidates, host_of
 
 logger = logging.getLogger(__name__)
@@ -204,6 +205,9 @@ class ServerDownloadManager:
         return {"dir": target, "exists": True, "files": files}
 
     def _root_for_channel(self, channel: str) -> str:
+        if channel == "preview":
+            # 预览缓存：独立目录，不混进用户的下载归档
+            return preview_dir()
         return self.local_dir if channel == "local" else self.server_dir
 
     def _get_free_space_gb(self, path: str = "") -> float:
@@ -265,8 +269,8 @@ class ServerDownloadManager:
             folder_name = self.sanitize_filename(subdir)
         elif season_title:
             folder_name = self.sanitize_filename(season_title)
-        elif channel == "local":
-            folder_name = ""  # 用户已选定保存目录，直接平铺
+        elif channel in ("local", "preview"):
+            folder_name = ""  # 用户已选定保存目录 / 预览缓存直接平铺
         else:
             folder_name = self.sanitize_filename(platform)
 
@@ -623,22 +627,30 @@ class ServerDownloadManager:
         # 3. FFmpeg 极速封装落盘 (copy 流无损不转码)
         task.progress = 90
         self._notify_listeners("task_progress", task.dict())
-        
+
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", temp_v,
             "-i", temp_a,
             "-c:v", "copy",
             "-c:a", "copy",
+            # moov 前置：下载产物在任意播放器里可秒开；预览缓存靠它由 <video> 直接播
             "-movflags", "+faststart",
             task.save_path
         ]
 
-        proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ffmpeg_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        except FileNotFoundError as exc:
+            # 桌面客户端启动时会把内嵌 ffmpeg 放进 PATH；裸跑服务端时可能没有
+            raise RuntimeError(
+                "未找到 ffmpeg（音视频混流依赖它，桌面客户端已内嵌；"
+                "自行部署请安装 ffmpeg 并加入 PATH）"
+            ) from exc
         _, stderr = await proc.communicate()
 
         # 清理临时音视频轨

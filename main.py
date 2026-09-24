@@ -15,7 +15,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.0.0"
+APP_VERSION = "2.5.1.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -232,14 +232,18 @@ async def stream_mux_download(
         headers={
             "Content-Disposition": content_disposition,
             "Access-Control-Allow-Origin": "*",
-            "Accept-Ranges": "bytes",
+            # 这里**故意不声明** Accept-Ranges：本接口是实时 ffmpeg 管道流，没有
+            # Content-Length、也不实现 Range 请求。早期版本错写成 "bytes"，等于
+            # 告诉播放器「你可以寻址」，而 Safari/AVFoundation 会据此发起 Range
+            # 探测、拿不到 206 就判定资源不可播放（实测无论声明与否都播不了，
+            # 声明只会让排查更绕）。网页内预览请改用 /api/preview/*（落盘后提供）。
         },
     )
 
 # ==========================================================================
 # 服务端 / NAS 自动归档与任务管理接口
 # ==========================================================================
-from downloader import server_downloader
+from downloader import server_downloader, preview
 from downloader.server_downloader import DuplicateTaskError
 from downloader.paths import is_desktop_mode
 
@@ -390,6 +394,76 @@ async def reveal_local_file(req: RevealRequest):
     if not server_downloader.reveal_file(req.path):
         raise HTTPException(status_code=404, detail="文件不存在或不在下载目录内")
     return {"success": True}
+
+# ==========================================================================
+# 视频预览：先落盘缓存再以文件（真 Range）提供
+#
+# 背景：桌面客户端是 WKWebView，<video> 走 AVFoundation，它只接受可寻址资源。
+# 原来的 /api/stream/mux 实时管道流（chunked、无 Content-Length、不实现 Range）
+# 被 AVFoundation 直接判为不可播放（实测 isPlayable=ERR(Operation Stopped)），
+# 表现就是预览区黑屏。改成「下载混流为本地文件 -> FileResponse」后实测可播且可拖动。
+# ==========================================================================
+
+class PreviewPrepareRequest(BaseModel):
+    video_url: str
+    audio_url: Optional[str] = None
+    title: Optional[str] = None
+
+def _preview_task_id(key: str) -> str:
+    return f"preview_{key}"
+
+@app.post("/api/preview/prepare")
+async def prepare_preview(req: PreviewPrepareRequest):
+    """准备预览文件：命中缓存直接返回，否则后台混流并回传进度"""
+    if not req.video_url:
+        raise HTTPException(status_code=400, detail="缺少 video_url 参数")
+
+    key = preview.cache_key(req.video_url, req.audio_url or "")
+    if preview.is_ready(key):
+        return {"success": True, "key": key, "ready": True, "progress": 100}
+
+    task_id = _preview_task_id(key)
+    existing = server_downloader.tasks.get(task_id)
+    if existing and existing.status in ("waiting", "running"):
+        return {"success": True, "key": key, "ready": False, "progress": existing.progress}
+
+    preview.evict_old(keep_key=key)
+    try:
+        task = server_downloader.add_task(
+            direct_url=req.video_url,
+            audio_url=req.audio_url or None,
+            title=req.title or "预览",
+            channel="preview",
+            filename=f"{key}.mp4",
+            task_id=task_id,
+        )
+    except DuplicateTaskError:
+        return {"success": True, "key": key, "ready": False, "progress": 0}
+    return {"success": True, "key": key, "ready": False, "progress": task.progress}
+
+@app.get("/api/preview/{key}/status")
+async def preview_status(key: str):
+    """查询预览准备进度；文件已就绪时以文件为准（任务可能已被清理）"""
+    if preview.is_ready(key):
+        return {"success": True, "ready": True, "progress": 100}
+    task = server_downloader.tasks.get(_preview_task_id(key))
+    if not task:
+        return {"success": True, "ready": False, "progress": 0, "status": "unknown"}
+    return {
+        "success": True,
+        "ready": task.status == "success",
+        "progress": task.progress,
+        "status": task.status,
+        "error": task.error,
+    }
+
+@app.get("/api/preview/{key}/stream")
+async def preview_stream(key: str):
+    """以文件方式提供预览（FileResponse 自带 Range/206，可拖动进度条）"""
+    path = preview.cache_path(key)
+    if not preview.is_ready(key):
+        raise HTTPException(status_code=404, detail="预览尚未准备好")
+    return FileResponse(path, media_type="video/mp4")
 
 @app.post("/api/local/download")
 async def create_local_downloads(req: ServerBatchDownloadRequest):

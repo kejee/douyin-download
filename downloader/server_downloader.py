@@ -13,6 +13,7 @@ from downloader.paths import (
     ensure_dir,
     is_desktop_mode,
     load_local_dir,
+    reveal_in_file_manager,
     save_local_dir,
 )
 from downloader.http_util import bilibili_cookie, download_headers
@@ -160,6 +161,27 @@ class ServerDownloadManager:
             "suggested": self.unique_filename(safe, subdir),
         })
         return info
+
+    def reveal_file(self, path: str) -> bool:
+        """在访达/资源管理器中定位已下载的文件（桌面端「定位文件」入口）。
+
+        这是一个可由页面 JS 直接调用的接口，因此必须限制范围：只允许定位
+        **下载根目录**（本地保存目录 / 服务端归档目录）之内的文件，
+        避免被用来探测或打开任意路径。
+        """
+        target = os.path.realpath(path or "")
+        if not target or not os.path.isfile(target):
+            return False
+        roots = {
+            os.path.realpath(self.local_dir),
+            os.path.realpath(self.server_dir),
+        }
+        if not any(root and target.startswith(root + os.sep) for root in roots):
+            logger.warning(f"拒绝定位下载目录之外的文件: {target}")
+            return False
+        ok = reveal_in_file_manager(target)
+        logger.info(f"定位文件 | {target} | {'成功' if ok else '失败'}")
+        return ok
 
     def list_local_files(self, subdir: str = "") -> Dict[str, Any]:
         """列出桌面端保存目录下的文件名

@@ -15,7 +15,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.4.3.0"
+APP_VERSION = "2.5.0.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -241,6 +241,7 @@ async def stream_mux_download(
 # ==========================================================================
 from downloader import server_downloader
 from downloader.server_downloader import DuplicateTaskError
+from downloader.paths import is_desktop_mode
 
 class ServerDownloadItem(BaseModel):
     url: Optional[str] = None
@@ -373,6 +374,22 @@ async def list_local_files(subdir: str = ""):
     供前端批量下载前跳过「本地已存在」的集数，避免重复拉取。只读。
     """
     return server_downloader.list_local_files(subdir)
+
+class RevealRequest(BaseModel):
+    path: str
+
+@app.post("/api/local/reveal")
+async def reveal_local_file(req: RevealRequest):
+    """在系统文件管理器中定位已下载的文件（桌面端）
+
+    需要真正操作桌面的能力，因此只在桌面客户端模式下开放；NAS/服务端模式下
+    文件在远端，定位无意义。路径范围由 reveal_file 校验（仅限下载根目录内）。
+    """
+    if not is_desktop_mode():
+        raise HTTPException(status_code=400, detail="仅桌面客户端支持定位文件")
+    if not server_downloader.reveal_file(req.path):
+        raise HTTPException(status_code=404, detail="文件不存在或不在下载目录内")
+    return {"success": True}
 
 @app.post("/api/local/download")
 async def create_local_downloads(req: ServerBatchDownloadRequest):

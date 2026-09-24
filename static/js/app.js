@@ -1160,6 +1160,8 @@ async function initServerArchiving() {
                             if (data.status !== "running") localTask.pendingPause = false;
                         }
                         localTask.progress = data.progress;
+                        // 落盘绝对路径（供「在访达中显示」定位文件）
+                        if (data.save_path) localTask.savePath = data.save_path;
                         renderTaskManagerUI();
                     } else if (event === "task_added" || data.status === "running") {
                         window.taskQueue.push({
@@ -1169,6 +1171,7 @@ async function initServerArchiving() {
                             status: data.status,
                             progress: data.progress,
                             errorMsg: data.error,
+                            savePath: data.save_path || '',
                             isServerTask: true,
                         });
                         renderTaskManagerUI();
@@ -1206,6 +1209,57 @@ function toggleTaskManager(show = true) {
             bubble.style.display = "none";
         }
     }
+}
+
+// ==========================================================================
+// 任务列表渲染
+//
+// 进度事件是**逐数据块**推送的（后端每读到 64KB 发一条，1.5GB 的文件约 2.4 万条），
+// 早期实现每来一条就整表重建 innerHTML。重建会销毁并新建卡片上的按钮节点，而
+// 浏览器要求 mousedown 与 mouseup 落在**同一个**节点上才会派发 click —— 只要重渲染
+// 卡在按下与松开之间，click 就彻底不派发，表现成「点单条任务的暂停没反应」
+// （批量暂停按钮在抽屉头部、不参与重建，所以一直是好的）。
+//
+// 隔离实验（headless Chrome + CDP 真实鼠标手势，40ms 按压窗口内重建 179 次）：
+//   整表重建 + onclick     -> click 0 次
+//   节点稳定 + onclick     -> click 1 次
+//   整表重建 + pointerdown -> click 1 次
+//
+// 因此这里上双保险：
+//   1. 结构（任务集合与状态）没变时**不重建 DOM**，只原地刷进度条与状态文字；
+//   2. 任务卡片上的操作按钮一律走 pointerdown（按下即触发，不依赖 mouseup）。
+// ==========================================================================
+window._tmStructureSignature = null;
+
+function _tmSignature() {
+    return window.taskQueue
+        .map(t => [t.id, t.status, t.title, t.filename || '', t.savePath || ''].join('|'))
+        .join('\n');
+}
+
+function _tmSelector(taskId, attr) {
+    const key = (window.CSS && window.CSS.escape) ? window.CSS.escape(taskId) : taskId;
+    return `[data-${attr}="${key}"]`;
+}
+
+function _tmPatchProgress() {
+    window.taskQueue.forEach(t => {
+        const bar = document.querySelector(_tmSelector(t.id, "task-bar"));
+        if (bar) bar.style.width = `${t.progress || 0}%`;
+        if (t.status !== 'running') return;
+        const badge = document.querySelector(_tmSelector(t.id, "task-badge"));
+        if (badge) badge.textContent = `下载中 ${t.progress || 0}%`;
+    });
+}
+
+// 同一帧内的多次进度更新只刷一次，避免逐块事件把主线程占满
+let _tmPatchQueued = false;
+function _tmScheduleProgressPatch() {
+    if (_tmPatchQueued) return;
+    _tmPatchQueued = true;
+    const run = () => { _tmPatchQueued = false; _tmPatchProgress(); };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else setTimeout(run, 16);
 }
 
 // 渲染任务管理器界面
@@ -1248,6 +1302,14 @@ function renderTaskManagerUI() {
     const bubbleText = document.getElementById("tmBubbleText");
     if (bubbleText) bubbleText.textContent = `下载管理 (${success}/${total})`;
 
+    // 结构未变（只是进度在走）：绝不重建 DOM，只原地刷进度，保证节点稳定可点
+    const signature = _tmSignature();
+    if (signature === window._tmStructureSignature) {
+        _tmScheduleProgressPatch();
+        return;
+    }
+    window._tmStructureSignature = signature;
+
     if (total === 0) {
         listEl.innerHTML = `
             <div style="text-align: center; color: var(--text-dim); padding: 30px 10px; font-size: 12px;">
@@ -1271,30 +1333,54 @@ function renderTaskManagerUI() {
                 <div class="task-item-main">
                     <span class="task-item-title" title="${t.title}">${t.title}</span>
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <span class="task-status-badge ${statusClass}">${statusLabel}</span>
+                        <span class="task-status-badge ${statusClass}" data-task-badge="${t.id}">${statusLabel}</span>
                         <div class="task-item-actions">
                             ${t.status === 'running' ? `
-                            <button class="btn-task-action" onclick="pauseTask('${t.id}')" title="暂停此任务">
+                            <button class="btn-task-action" data-task-action="pause" data-task-id="${t.id}" title="暂停此任务">
                                 <i class="fa-solid fa-pause"></i>
                             </button>` : ''}
                             ${t.status === 'paused' || t.status === 'waiting' ? `
-                            <button class="btn-task-action" onclick="resumeTask('${t.id}')" title="开始/继续此任务">
+                            <button class="btn-task-action" data-task-action="resume" data-task-id="${t.id}" title="开始/继续此任务">
                                 <i class="fa-solid fa-play"></i>
                             </button>` : ''}
                             ${t.status === 'error' ? `
-                            <button class="btn-task-action" onclick="retryTask('${t.id}')" title="重试此任务">
+                            <button class="btn-task-action" data-task-action="retry" data-task-id="${t.id}" title="重试此任务">
                                 <i class="fa-solid fa-arrows-rotate"></i>
+                            </button>` : ''}
+                            ${t.status === 'success' && t.savePath ? `
+                            <button class="btn-task-action" data-task-action="reveal" data-task-id="${t.id}" title="在访达中显示此文件">
+                                <i class="fa-solid fa-folder-open"></i>
                             </button>` : ''}
                         </div>
                     </div>
                 </div>
                 <div class="task-item-progress-track">
-                    <div class="task-item-progress-bar" style="width: ${t.progress || 0}%;"></div>
+                    <div class="task-item-progress-bar" data-task-bar="${t.id}" style="width: ${t.progress || 0}%;"></div>
                 </div>
             </div>
         `;
     }).join("");
 }
+
+// 任务卡片上的操作按钮：统一用 pointerdown 事件委派。
+// 1) pointerdown 在按下瞬间触发，不要求 mouseup 落在同一节点，天然免疫重渲染；
+// 2) 容器 #taskManagerList 自身从不被重建，监听器一次注册永久有效。
+(function bindTaskActionDelegation() {
+    const listEl = document.getElementById("taskManagerList");
+    if (!listEl) return;
+    listEl.addEventListener("pointerdown", (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest("[data-task-action]") : null;
+        if (!btn) return;
+        if (e.pointerType === "mouse" && e.button !== 0) return;
+        e.stopPropagation();
+        const action = btn.dataset.taskAction;
+        const taskId = btn.dataset.taskId;
+        if (action === "pause") pauseTask(taskId);
+        else if (action === "resume") resumeTask(taskId);
+        else if (action === "retry") retryTask(taskId);
+        else if (action === "reveal") revealTaskFile(taskId);
+    });
+})();
 
 // 调度任务队列并发
 function scheduleTaskQueue() {
@@ -1375,6 +1461,8 @@ async function submitTaskToBackend(task) {
         task.serverSide = true;
         task.status = "waiting";
         task.progress = 2;
+        // 记下后端算好的落盘绝对路径，任务完成后可一键在访达中定位
+        if (data.tasks[0].save_path) task.savePath = data.tasks[0].save_path;
     } catch (err) {
         task.submitted = false;
         task.status = "error";
@@ -1487,14 +1575,48 @@ async function runSingleTask(task) {
 }
 
 // 单任务控制
-function pauseTask(taskId) {
+//
+// 桌面端任务的真身在 Python 侧，前端只是镜像。这里先乐观切一下给即时反馈，
+// 再用后端返回值校正：后端会拒绝对「已完成/已取消」的任务暂停，若前端不回退，
+// 界面就会卡在「已暂停」而实际早已成功，连点「继续」都救不回来。
+async function syncTaskStatusFromServer(taskId) {
+    try {
+        const resp = await fetch("/api/server/tasks");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const remote = (data.tasks || []).find(t => t.id === taskId);
+        const local = window.taskQueue.find(t => t.id === taskId);
+        if (!remote || !local) return;
+        local.status = remote.status;
+        local.progress = remote.progress;
+        local.errorMsg = remote.error || null;
+        if (remote.save_path) local.savePath = remote.save_path;
+        renderTaskManagerUI();
+    } catch (e) {
+        console.warn("与服务端对齐任务状态失败:", e);
+    }
+}
+
+async function pauseTask(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
     if (!task) return;
     if (task.serverSide) {
-        fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/pause`, { method: "POST" }).catch(() => {});
         task.status = 'paused';
         task.pendingPause = true;
         renderTaskManagerUI();
+        try {
+            const resp = await fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/pause`, { method: "POST" });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || data.success === false) {
+                task.pendingPause = false;
+                await syncTaskStatusFromServer(taskId);
+                showToast("该任务已结束，无需暂停", "info");
+            }
+        } catch (e) {
+            task.pendingPause = false;
+            console.warn("暂停请求失败:", e);
+            showToast("暂停请求失败，请重试", "error");
+        }
         return;
     }
     if (task.status === 'running' && task.abortCtrl) {
@@ -1505,14 +1627,21 @@ function pauseTask(taskId) {
     scheduleTaskQueue();
 }
 
-function resumeTask(taskId) {
+async function resumeTask(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
     if (!task) return;
     if (task.serverSide) {
-        fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" }).catch(() => {});
         task.status = 'waiting';
         task.pendingPause = false;
         renderTaskManagerUI();
+        try {
+            const resp = await fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || data.success === false) await syncTaskStatusFromServer(taskId);
+        } catch (e) {
+            console.warn("继续请求失败:", e);
+            showToast("继续请求失败，请重试", "error");
+        }
         return;
     }
     task.status = 'waiting';
@@ -1520,21 +1649,52 @@ function resumeTask(taskId) {
     scheduleTaskQueue();
 }
 
-function retryTask(taskId) {
+async function retryTask(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
     if (!task) return;
     if (task.serverSide) {
-        fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" }).catch(() => {});
         task.status = 'waiting';
         task.progress = 0;
         task.pendingPause = false;
         renderTaskManagerUI();
+        try {
+            const resp = await fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || data.success === false) await syncTaskStatusFromServer(taskId);
+        } catch (e) {
+            console.warn("重试请求失败:", e);
+            showToast("重试请求失败，请稍后再试", "error");
+        }
         return;
     }
     task.status = 'waiting';
     task.progress = 0;
     renderTaskManagerUI();
     scheduleTaskQueue();
+}
+
+// 在访达/资源管理器中定位已下载的文件（只对原生落盘的任务有意义）
+async function revealTaskFile(taskId) {
+    const task = window.taskQueue.find(t => t.id === taskId);
+    const path = task && task.savePath;
+    if (!path) {
+        showToast("该任务没有可定位的本地文件", "error");
+        return;
+    }
+    try {
+        const resp = await fetch("/api/local/reveal", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: path }),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            throw new Error(data.detail || "定位文件失败");
+        }
+        showToast("已在访达中定位该文件", "success");
+    } catch (e) {
+        showToast(e.message || "定位文件失败", "error");
+    }
 }
 
 // 批量全局控制

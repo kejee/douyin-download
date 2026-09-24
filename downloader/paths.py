@@ -7,6 +7,7 @@
 3. 桌面端（APP_MODE=desktop 或 PyInstaller 冻结）使用稳定的用户目录。
 """
 import os
+import subprocess
 import sys
 
 APP_NAME = "UniversalDownloader"
@@ -101,3 +102,34 @@ def save_local_dir(path: str) -> bool:
     data = load_settings()
     data["local_dir"] = path
     return save_settings(data)
+
+
+def reveal_in_file_manager(path: str) -> bool:
+    """在系统文件管理器中定位并高亮某个文件。
+
+    与 open_path（单纯打开目录）的区别：这里希望文件管理器中**选中**目标文件，
+    macOS 用 `open -R`，Windows 用 `explorer /select,`；Linux 各家文件管理器没有
+    统一的「选中」协议，退化为打开父目录。
+
+    调用方需自行校验路径的合法性（见 ServerDownloadManager.reveal_file）。
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return False
+    target = os.path.abspath(raw)
+    if not os.path.exists(target):
+        return False
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", target])
+        elif sys.platform == "win32":
+            if os.path.isdir(target):
+                os.startfile(target)  # noqa: S606
+            else:
+                subprocess.Popen(["explorer", "/select,", target])
+        else:
+            parent = target if os.path.isdir(target) else os.path.dirname(target)
+            subprocess.Popen(["xdg-open", parent])
+        return True
+    except OSError:
+        return False

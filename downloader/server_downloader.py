@@ -74,6 +74,12 @@ class ServerTask(BaseModel):
 class ServerDownloadManager:
     """服务端/NAS/桌面端 统一异步下载与自动归档调度引擎"""
 
+    # 同一个候选地址内的重试次数（含首次）与退避秒数。
+    # 网络抖动是最常见的中断形态，而换源意味着从头开始 —— 所以先在同源上
+    # 多试几次（可从断点续传），把换源留给真正的源端故障。
+    TRACK_RETRIES = 3
+    RETRY_BACKOFF = (1.0, 2.5)
+
     def __init__(self, download_dir: str = DOWNLOAD_DIR, max_concurrent: int = 3):
         self.server_dir = download_dir
         self.local_dir = load_local_dir() if is_desktop_mode() else download_dir
@@ -297,15 +303,18 @@ class ServerDownloadManager:
                 )
                 self._notify_listeners("task_success", task.dict())
             except asyncio.CancelledError:
-                self._cleanup_temp_files(task)
                 if task.status == "canceled":
+                    # 用户主动取消：清理分片
+                    self._cleanup_temp_files(task)
                     logger.info(f"[{task.id}] 已取消 | {task.filename}")
                     self._notify_listeners("task_canceled", task.dict())
                 else:
+                    # 暂停：**保留分片**，继续时从断点续传
                     task.status = "paused"
                     logger.info(
                         f"[{task.id}] 已暂停 | {task.filename} | "
                         f"已下载 {_fmt_size(task.downloaded_bytes)}/{_fmt_size(task.total_bytes)}"
+                        f"（保留分片，继续时从断点续传）"
                     )
                     self._notify_listeners("task_paused", task.dict())
             except Exception as e:
@@ -313,10 +322,23 @@ class ServerDownloadManager:
                     f"[{task.id}] 下载失败 | {task.filename} | "
                     f"耗时 {time.time() - task.created_at:.1f}s | {e}"
                 )
-                self._cleanup_temp_files(task)
+                # 失败时同样保留分片：用户点「重试」即可从断点续传。
+                # 残片的回收交给 clear_completed（见下）。
                 task.status = "error"
                 task.error = str(e)
                 self._notify_listeners("task_error", task.dict())
+
+    @staticmethod
+    def _discard_partial(dest_path: str) -> None:
+        """丢弃已下载的临时分片
+
+        换源时调用。同源重试时相反 —— 必须保留分片，断点续传才有依据。
+        """
+        try:
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+        except OSError:
+            pass
 
     def _temp_path(self, task: ServerTask, suffix: str) -> str:
         """临时文件路径（带任务 id）
@@ -372,42 +394,74 @@ class ServerDownloadManager:
         span: int = 95,
         backups: Optional[List[str]] = None,
     ):
-        """下载单条轨道，被拒时按候选地址换源重试。
+        """下载单条轨道：同源退避重试（可续传）→ 换源从头来。
 
-        B站会把部分码率变体调度到第三方 PCDN 节点（*.mcdn.bilivideo.cn /
-        *.edge.mountaintoys.cn），这类节点按 IP + 会话授权、稳定性差，实测会
-        直接返回 403；官方 upos-* 镜像接受同一份签名路径（实测 6/6 可用）。
-        因此按「原地址 → 备份地址 → 官方镜像改写」逐个重试，并透传 SESSDATA，
-        避免登录态高码率流被判未授权。
+        两级策略，对应两类不同的故障：
+
+        1. **同一个地址最多试 TRACK_RETRIES 次**，第 2 次起带 Range 从断点继续。
+           网络抖动（连接被重置、读超时）属于瞬时故障，同源重试 + 续传能把已下
+           部分保住，避免白下。
+        2. 同源全部失败后才换下一个候选，**换源时丢弃已下载分片** —— 不同 CDN
+           边缘缓存返回的可能是不同字节版本，跨源拼接有损坏风险，因此不做。
+
+        候选链本身来自 B站会把部分变体调度到第三方 PCDN 节点的现实：
+        *.mcdn.bilivideo.cn / *.edge.mountaintoys.cn 按 IP + 会话授权、实测会直接
+        403，而官方 upos-* 镜像接受同一份签名路径（实测 6/6 可用）。
         """
         candidates = build_download_candidates(url, backups)
         last_error = ""
         for index, candidate in enumerate(candidates):
             if index:
                 logger.warning(
-                    f"[{task.id}] {label} 换源重试 {index + 1}/{len(candidates)} "
+                    f"[{task.id}] {label} 换源 {index + 1}/{len(candidates)} "
                     f"-> {host_of(candidate)}（上次失败: {last_error}）"
                 )
+                self._discard_partial(dest_path)
+                task.downloaded_bytes = 0
                 task.progress = base_progress
                 self._notify_listeners("task_progress", task.dict())
+
             headers = download_headers(candidate, cookie=bilibili_cookie(task.sessdata))
-            try:
-                await self._stream_to_file(
-                    task, candidate, headers, dest_path, base_progress, span
-                )
-                logger.info(
-                    f"[{task.id}] {label} 完成 | {host_of(candidate)} | "
-                    f"{_fmt_size(task.downloaded_bytes)} | 候选 {index + 1}/{len(candidates)}"
-                )
-                return
-            except _SourceRejected as exc:
-                last_error = str(exc)
-                continue
-            except httpx.HTTPError as exc:
-                # 连接被拒 / DNS 失败 / 超时 / 协议错误同样换源重试。
-                # CDN 主机不可达是比 4xx 更常见的故障形态，不能只对状态码换源。
-                last_error = f"{type(exc).__name__}: {exc}"
-                continue
+
+            for attempt in range(self.TRACK_RETRIES):
+                offset = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+
+                # 分片已经完整（例如上次写完但 rename 失败）：不必再下
+                if offset and task.total_bytes and offset >= task.total_bytes:
+                    logger.info(
+                        f"[{task.id}] {label} 分片已完整（{_fmt_size(offset)}），跳过下载"
+                    )
+                    return
+
+                if attempt:
+                    wait = self.RETRY_BACKOFF[min(attempt - 1, len(self.RETRY_BACKOFF) - 1)]
+                    logger.warning(
+                        f"[{task.id}] {label} 同源重试 {attempt + 1}/{self.TRACK_RETRIES} "
+                        f"（{host_of(candidate)}，已下载 {_fmt_size(offset)}，"
+                        f"{wait}s 后继续）: {last_error}"
+                    )
+                    await asyncio.sleep(wait)
+
+                try:
+                    await self._stream_to_file(
+                        task, candidate, headers, dest_path, base_progress, span,
+                        resume_offset=offset,
+                    )
+                    logger.info(
+                        f"[{task.id}] {label} 完成 | {host_of(candidate)} | "
+                        f"{_fmt_size(task.downloaded_bytes)} | 候选 {index + 1}/{len(candidates)}"
+                        + (f" | 同源重试 {attempt} 次" if attempt else "")
+                    )
+                    return
+                except _SourceRejected as exc:
+                    # 源端明确拒绝（4xx/5xx）：同源重试没有意义，直接换源
+                    last_error = str(exc)
+                    break
+                except (httpx.HTTPError, OSError) as exc:
+                    # 网络类故障（连接重置 / 超时 / 读中断）：同源重试，可续传
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    continue
+
         raise RuntimeError(
             f"{label}全部候选地址均不可用（共 {len(candidates)} 个）: {last_error}"
         )
@@ -420,28 +474,57 @@ class ServerDownloadManager:
         dest_path: str,
         base_progress: int,
         span: int,
-    ):
+        resume_offset: int = 0,
+    ) -> int:
+        """把一条轨道流式写入 dest_path，返回本次写入的字节数。
+
+        resume_offset > 0 时带 Range 请求续传。**必须判断服务端是否真的接受了
+        Range**：若返回 200（整段内容）而我们仍以追加模式写入，分片会被拼坏 ——
+        所以只在收到 206 时才追加，否则退回整段重写。实测 B站官方镜像支持
+        Range（Accept-Ranges: bytes，Range 请求返回 206）。
+        """
+        request_headers = dict(headers)
+        if resume_offset > 0:
+            request_headers["Range"] = f"bytes={resume_offset}-"
+
         timeout = httpx.Timeout(120.0, connect=10.0)
-        async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(headers=request_headers, timeout=timeout, follow_redirects=True) as client:
             async with client.stream("GET", url) as resp:
+                if resp.status_code == 416:
+                    # 请求范围超出文件长度：分片已经到头了，视为完成
+                    logger.info(f"[{task.id}] 服务端返回 416，分片已完整")
+                    return 0
                 if resp.status_code >= 400:
                     raise _SourceRejected(f"HTTP {resp.status_code}")
 
-                total = int(resp.headers.get("content-length", 0))
-                task.total_bytes = total
-                task.downloaded_bytes = 0
+                appending = resume_offset > 0 and resp.status_code == 206
+                if resume_offset > 0 and not appending:
+                    logger.warning(
+                        f"[{task.id}] 该源不支持断点续传（HTTP {resp.status_code}），"
+                        f"丢弃已下载的 {_fmt_size(resume_offset)} 重新下载"
+                    )
 
-                with open(dest_path, "wb") as f:
+                content_length = int(resp.headers.get("content-length", 0) or 0)
+                start = resume_offset if appending else 0
+                total = (start + content_length) if content_length else 0
+                if total:
+                    task.total_bytes = total
+                task.downloaded_bytes = start
+
+                written = 0
+                with open(dest_path, "ab" if appending else "wb") as f:
                     async for chunk in resp.aiter_bytes(chunk_size=65536):
                         if task.status in ("paused", "canceled"):
                             raise asyncio.CancelledError()
                         f.write(chunk)
-                        task.downloaded_bytes += len(chunk)
+                        written += len(chunk)
+                        task.downloaded_bytes = start + written
                         if total > 0:
                             task.progress = min(
                                 99, base_progress + int((task.downloaded_bytes / total) * span)
                             )
                             self._notify_listeners("task_progress", task.dict())
+                return written
 
     async def _download_and_mux_ffmpeg(
         self,
@@ -539,6 +622,10 @@ class ServerDownloadManager:
     def clear_completed(self) -> int:
         to_del = [tid for tid, t in self.tasks.items() if t.status in ["success", "canceled", "error"]]
         for tid in to_del:
+            task = self.tasks[tid]
+            # 成功任务的临时分片已被 rename 掉；失败/取消的可能还留着，一并回收
+            if task.status != "success":
+                self._cleanup_temp_files(task)
             del self.tasks[tid]
         return len(to_del)
 

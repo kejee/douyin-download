@@ -2808,7 +2808,10 @@ body {
     position: fixed;
     bottom: 24px;
     right: 24px;
-    width: 480px;
+    /* 宽度 480px 装不下头部：标题 151 + 按钮组 449 + 内边距 36 ≈ 636px，
+       实测 480 时标题与四个按钮各折成两行（头部高 72px）。
+       600px 是在"重试按钮精简为「重试 (N)」"前提下全单行的取值。 */
+    width: 600px;
     max-width: calc(100vw - 32px);
     max-height: 520px;
     background: rgba(15, 23, 42, 0.95);
@@ -2833,7 +2836,9 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 18px;
+    /* 左右 16px：与保存栏、统计条对齐（原本是 18px，反而比下面各行多缩进 2px）；
+       顺带把最坏情况（「重试 (N)」常驻）在 600px 下的余量从 0 提到 4px */
+    padding: 14px 16px;
     background: rgba(255, 255, 255, 0.03);
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -2912,12 +2917,19 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
+    /* 标题与按钮组一律不折行、不被压缩：宁可整体不换行，
+       也不要出现「批量任务管 / 理器」这种断字（曾因 480px 宽度出现） */
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .task-manager-ctrls {
     display: flex;
     align-items: center;
-    gap: 6px;
+    /* gap 4px：最坏情况下（「重试 (N)」常驻）600px 恰好装下是"零余量"，
+       换个字体渲染就可能溢出，留 4px 缓冲 */
+    gap: 4px;
+    flex-shrink: 0;
 }
 
 .btn-tm-ctrl {
@@ -2926,7 +2938,10 @@ body {
     color: var(--text-main);
     font-size: 11px;
     font-weight: 600;
-    padding: 4px 8px;
+    /* 左右各 6px：实测 7px 时最坏情况（「重试 (N)」常驻）在 600px 下仍差 5px 溢出，
+       6px 后整行留出 5px 余量，抽屉不再裁掉按钮右边缘 */
+    padding: 4px 6px;
+    white-space: nowrap;
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: all 0.2s ease;
@@ -3134,7 +3149,10 @@ body {
     color: #fff;
 }
 
-/* 最小化气泡 */
+/* 任务管理入口气泡
+   常驻显示：此前只在"有任务且用户手动收起抽屉"时出现，导致队列为空时界面
+   完全没有入口（重启后更是连历史都看不到）。改为按状态分级：
+   is-idle（灰、半透明） / has-history（灰、可读） / has-active（彩色） / has-failed（红） */
 .task-manager-bubble {
     position: fixed;
     bottom: 24px;
@@ -3156,6 +3174,135 @@ body {
 }
 .task-manager-bubble:hover {
     transform: translateY(-2px) scale(1.04);
+}
+
+/* 无任务无历史：存在但不抢注意力（用户需要时能发现，不需要时不碍眼） */
+.task-manager-bubble.is-idle {
+    background: rgba(30, 41, 59, 0.9);
+    color: rgba(203, 213, 225, 0.75);
+    box-shadow: 0 4px 12px -4px rgba(0, 0, 0, 0.6);
+    border-color: rgba(255, 255, 255, 0.12);
+    opacity: 0.62;
+}
+.task-manager-bubble.is-idle:hover {
+    opacity: 1;
+    color: #fff;
+}
+
+/* 有历史、无活跃任务：能读、不刺眼 */
+.task-manager-bubble.has-history {
+    background: rgba(30, 41, 59, 0.95);
+    color: #cbd5e1;
+    box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.7);
+    border-color: rgba(148, 163, 184, 0.35);
+}
+
+/* 有失败任务：红色提示，优先级高于"有历史" */
+.task-manager-bubble.has-failed {
+    background: rgba(127, 29, 29, 0.95);
+    color: #fee2e2;
+    border-color: rgba(239, 68, 68, 0.55);
+    box-shadow: 0 6px 18px -6px rgba(239, 68, 68, 0.6);
+}
+
+.tm-bubble-badge {
+    background: #ef4444;
+    color: #fff;
+    font-size: 10.5px;
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 1px 6px;
+    min-width: 16px;
+    text-align: center;
+}
+
+/* ===== 任务列表分区（进行中 / 已完成与历史）===== */
+
+.task-list-group {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 2px 2px;
+    margin-top: 2px;
+}
+
+.task-list-group-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-main);
+    white-space: nowrap;
+}
+
+.task-list-group-count {
+    color: var(--text-dim);
+    font-weight: 500;
+}
+
+.task-list-group-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* 历史折叠行：整行可点，点哪都能展开/收起 */
+.task-history-collapse {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 12px;
+    border: 1px dashed rgba(148, 163, 184, 0.35);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.18s ease;
+}
+.task-history-collapse:hover {
+    border-color: rgba(56, 189, 248, 0.5);
+    color: var(--text-main);
+    background: rgba(56, 189, 248, 0.07);
+}
+
+.task-history-collapse-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.task-history-clear {
+    color: var(--text-dim);
+    font-size: 11.5px;
+}
+.task-history-clear:hover {
+    color: #f87171;
+}
+
+/* 历史条目卡片：比活跃任务卡片暗一档，避免和历史抢注意力 */
+.task-item-card.is-history {
+    opacity: 0.82;
+}
+.task-item-card.is-history:hover {
+    opacity: 1;
+}
+
+.task-item-platform {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    border-radius: 3px;
+    padding: 0 4px;
+    white-space: nowrap;
+}
+
+.task-item-time {
+    font-size: 10.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
 }
 
 /* ===== 桌面客户端扩展 ===== */

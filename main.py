@@ -16,7 +16,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.3.0"
+APP_VERSION = "2.5.4.0"
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,7 @@ async def stream_mux_download(
 from downloader import server_downloader, preview
 from downloader.server_downloader import DuplicateTaskError
 from downloader.paths import is_desktop_mode
+from downloader.history import clear_history, delete_history, load_history
 
 class ServerDownloadItem(BaseModel):
     url: Optional[str] = None
@@ -337,6 +338,35 @@ async def cancel_server_task(task_id: str):
 async def clear_server_tasks():
     count = server_downloader.clear_completed()
     return {"success": True, "cleared_count": count}
+
+class HistoryDeleteRequest(BaseModel):
+    ids: List[str] = []
+
+@app.get("/api/history")
+async def get_download_history():
+    """下载历史（最近的在前）。
+
+    任务进入终态时由 ServerDownloadManager 落一条，重启客户端后依然可查 ——
+    这是"任务列表重启即清空"的补偿数据源。
+    """
+    entries = load_history()
+    return {"count": len(entries), "entries": entries}
+
+@app.post("/api/history/clear")
+async def clear_download_history():
+    """清空下载历史（只删记录，不动已下载的文件）"""
+    count = clear_history()
+    return {"success": True, "cleared": count}
+
+@app.post("/api/history/delete")
+async def delete_download_history(req: HistoryDeleteRequest):
+    """按 id 删除历史记录。
+
+    用于「移除单条历史」与头部「清除完成」：界面上历史与任务列表是同一块区域，
+    列表里清掉的条目必须在历史里一起消失，否则会被当成"按钮没生效"。
+    """
+    count = delete_history(req.ids)
+    return {"success": True, "deleted": count}
 
 class ConcurrencyRequest(BaseModel):
     max_concurrent: int

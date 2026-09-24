@@ -1299,6 +1299,11 @@ async function initServerArchiving() {
     // 此时 window.isDesktop 已确定（或退化为检测 pywebview 桥）
     initSponsorAd();
 
+    // 入口常驻：先把气泡显示出来，历史拉回来后再按内容分级刷新。
+    // 不能等历史/任务就绪才显示 —— 那正是"第一次有下载任务才出现入口"的老问题。
+    updateTaskBubble();
+    loadDownloadHistory();
+
     try {
         const evtSource = new EventSource("/api/server/events");
         evtSource.onmessage = (e) => {
@@ -1326,6 +1331,11 @@ async function initServerArchiving() {
                         }
                         // 落盘绝对路径（供「在访达中显示」定位文件）
                         if (data.save_path) localTask.savePath = data.save_path;
+                        // 进入终态时记下完成时间：历史区要按它倒序排列，
+                        // 而且后端此时已经把这条写进 history.json，时间能对上。
+                        if (['success', 'error', 'canceled'].includes(data.status) && !localTask.finishedAt) {
+                            localTask.finishedAt = Date.now() / 1000;
+                        }
                         renderTaskManagerUI();
                         notifyTasksSettled();
                     } else if (event === "task_added" || data.status === "running") {
@@ -1360,20 +1370,10 @@ function toggleTaskManager(show = true) {
         refreshPreviewCacheInfo();
     } else {
         drawer.style.display = "none";
-        // 只要队列中有任务，关闭时常驻显示悬浮气泡，方便随时再次展开
-        if (window.taskQueue.length > 0) {
-            bubble.style.display = "flex";
-            const successCount = window.taskQueue.filter(t => t.status === 'success').length;
-            const runningCount = window.taskQueue.filter(t => t.status === 'running').length;
-            const bubbleText = document.getElementById("tmBubbleText");
-            if (bubbleText) {
-                bubbleText.textContent = runningCount > 0 
-                    ? `下载中 (${successCount}/${window.taskQueue.length})` 
-                    : `任务列表 (${successCount}/${window.taskQueue.length})`;
-            }
-        } else {
-            bubble.style.display = "none";
-        }
+        // 入口常驻：此前队列为空时气泡也一起消失，界面上就完全没有入口了，
+        // 重启客户端后更是连历史都看不到。现在无论有没有任务都保留入口，
+        // 由 updateTaskBubble 按状态分级显示（灰 / 有历史 / 有活跃 / 有失败）。
+        updateTaskBubble();
     }
 }
 
@@ -1397,10 +1397,134 @@ function toggleTaskManager(show = true) {
 // ==========================================================================
 window._tmStructureSignature = null;
 
+// ==========================================================================
+// 任务列表分区
+//
+// 此前所有任务混在一个列表里、按提交顺序 append：46 条「已完成」会把新任务挤到最
+// 底部，要往下滚才能看到自己刚加的东西。改为两个区：
+//   「进行中」  = running / waiting / paused / error（失败要留在活跃区提醒处理）
+//   「已完成与历史」= success / canceled，默认折叠
+// 活跃区按**倒序**渲染（新任务在最上面），所以永远不需要滚动。
+//
+// 历史有两条来源，按 id 去重：
+//   1. 当前会话内还留在 taskQueue 里的终态任务；
+//   2. 后端 history.json（任务终结时落盘，重启后仍在）。
+// ==========================================================================
+window.taskHistory = [];          // 后端持久化的历史（最近的在前）
+window._tmHistoryExpanded = false; // 历史区是否展开
+
+// 历史区最多渲染多少条：history.json 上限 500，全渲染会让 DOM 过重
+const TM_HISTORY_RENDER_LIMIT = 50;
+
+function _tmIsActive(t) {
+    return t.status === 'running' || t.status === 'waiting' || t.status === 'paused' || t.status === 'error';
+}
+
+function _tmTerminal(t) {
+    return t.status === 'success' || t.status === 'canceled';
+}
+
+// 合并「会话内终态任务」与「持久化历史」，按 id 去重，最近的在前
+function _tmHistoryItems() {
+    const liveIds = new Set(window.taskQueue.map(t => t.id));
+    const fromQueue = window.taskQueue.filter(_tmTerminal);
+    const persisted = window.taskHistory
+        .filter(h => !liveIds.has(h.id))
+        .map(h => ({
+            id: h.id,
+            title: h.title || h.filename || '已下载',
+            filename: h.filename || '',
+            status: h.status === 'canceled' ? 'canceled' : (h.status === 'error' ? 'error' : 'success'),
+            progress: h.status === 'success' ? 100 : 0,
+            sizeBytes: h.size_bytes || 0,
+            totalBytes: h.status === 'success' ? (h.size_bytes || 0) : 0,
+            downloadedBytes: h.status === 'success' ? (h.size_bytes || 0) : 0,
+            savePath: h.save_path || '',
+            platform: h.platform || '',
+            finishedAt: h.finished_at || 0,
+            errorMsg: h.error || '',
+            fromHistory: true,
+        }));
+    // 会话内的任务已经在数组里按提交顺序排列，历史需要按完成时间倒序
+    fromQueue.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+    return [...fromQueue, ...persisted];
+}
+
+// 入口气泡：常驻 + 分级
+//
+// 这个函数会被 renderTaskManagerUI 每次调用（包括每个进度数据块，一个 1.5GB
+// 文件约 2.4 万次）。所以状态没变时必须直接返回，绝不能每次写 DOM。
+window._tmBubbleState = null;
+
+function updateTaskBubble() {
+    const bubble = document.getElementById("taskManagerBubble");
+    if (!bubble) return;
+    const drawer = document.getElementById("taskManagerDrawer");
+    const drawerOpen = !!(drawer && drawer.style.display !== "none");
+    // 抽屉展开时气泡让位（同一个位置，否则会被压在下面）
+    if (drawerOpen) {
+        if (window._tmBubbleState !== "hidden") {
+            bubble.style.display = "none";
+            window._tmBubbleState = "hidden";
+        }
+        return;
+    }
+    const running = window.taskQueue.filter(t => t.status === 'running').length;
+    const waiting = window.taskQueue.filter(t => t.status === 'waiting').length;
+    const paused = window.taskQueue.filter(t => t.status === 'paused').length;
+    const error = window.taskQueue.filter(t => t.status === 'error').length;
+    const active = running + waiting + paused;
+    // 历史条数取「合并去重后的可见历史」（含本会话刚完成、还没被清掉的任务），
+    // 不能只数持久化历史 —— 否则刚下完 3 个文件、历史区明明写着「已完成与历史 · 3」，
+    // 气泡却还是「下载管理」，两处对不上。
+    const historyCount = window._tmHistoryCount || 0;
+
+    const stateKey = `${running}|${active}|${error}|${historyCount}`;
+    if (window._tmBubbleState === stateKey) return;   // 状态没变，一个 DOM 都不碰
+    window._tmBubbleState = stateKey;
+
+    const iconEl = document.getElementById("tmBubbleIcon");
+    const textEl = document.getElementById("tmBubbleText");
+    const badgeEl = document.getElementById("tmBubbleBadge");
+
+    bubble.classList.toggle("is-idle", active === 0 && error === 0 && historyCount === 0);
+    bubble.classList.toggle("has-history", active === 0 && error === 0 && historyCount > 0);
+    bubble.classList.toggle("has-failed", error > 0);
+    bubble.classList.toggle("has-active", active > 0);
+
+    if (iconEl) {
+        // 只有真有任务在跑才让它动，常驻时保持安静
+        iconEl.classList.toggle("fa-bounce", running > 0);
+    }
+    if (textEl) {
+        if (error > 0) textEl.textContent = `失败 ${error}`;
+        else if (active > 0) textEl.textContent = running > 0 ? `下载中 (${running}/${active})` : `待下载 ${active}`;
+        else if (historyCount > 0) textEl.textContent = `历史 ${historyCount}`;
+        else textEl.textContent = "下载管理";
+    }
+    if (badgeEl) {
+        // 徽标只承担"失败数量"这一个语义，避免和文案里的数字重复
+        if (error > 0) {
+            badgeEl.textContent = String(error);
+            badgeEl.style.display = "inline-block";
+        } else {
+            badgeEl.style.display = "none";
+        }
+    }
+    bubble.title = active > 0 ? "点击展开任务管理器（有任务进行中）" : "点击展开任务管理器";
+    bubble.style.display = "flex";
+}
+
 function _tmSignature() {
-    return window.taskQueue
+    // 分区之后，签名必须同时覆盖"历史区的可见集合与展开状态"：
+    // 否则任务从活跃区转移到历史区（或历史被清空）时不会重建 DOM，
+    // 界面会停在上一次的结构上（历史上踩过的整表重建坑的反面）。
+    const queuePart = window.taskQueue
         .map(t => [t.id, t.status, t.title, t.filename || '', t.savePath || ''].join('|'))
         .join('\n');
+    // 历史部分的签名由 renderTaskManagerUI 算好缓存（它已经遍历过一遍历史，
+    // 而这里的调用频率是"每个进度数据块一次"，不能重复遍历最多 500 条历史）
+    return `${queuePart}\n===history:${window._tmHistorySig || ''}`;
 }
 
 function _tmSelector(taskId, attr) {
@@ -1446,28 +1570,22 @@ function renderTaskManagerUI() {
     const success = window.taskQueue.filter(t => t.status === 'success').length;
     const error = window.taskQueue.filter(t => t.status === 'error').length;
 
+    // 徽章文案在下面按「活跃数 / 历史数」定稿（这里只取元素引用）
     const totalBadge = document.getElementById("taskTotalBadge");
-    if (totalBadge) totalBadge.textContent = `${total} 项`;
     const navBadge = document.getElementById("navTaskBadge");
-    if (navBadge) {
-        if (total > 0) {
-            navBadge.style.display = "inline-block";
-            navBadge.textContent = total;
-        } else {
-            navBadge.style.display = "none";
-        }
-    }
     const rEl = document.getElementById("statRunning"); if (rEl) rEl.textContent = running;
     const wEl = document.getElementById("statWaiting"); if (wEl) wEl.textContent = waiting;
     const pEl = document.getElementById("statPaused"); if (pEl) pEl.textContent = paused;
     const sEl = document.getElementById("statSuccess"); if (sEl) sEl.textContent = success;
     const eEl = document.getElementById("statError"); if (eEl) eEl.textContent = error;
 
-    // 有失败任务时才出现「重试失败」，并带上数量
+    // 有失败任务时才出现「重试」，并带上数量。
+    // 文案是「重试 (N)」而非「重试失败 (N)」：头部宽度实测卡在 636px，
+    // 少这两个字（-22px）才能让抽屉在 600px 下任何状态都不折行。
     const retryAllBtn = document.getElementById("btnRetryFailed");
     if (retryAllBtn) {
         retryAllBtn.style.display = error > 0 ? "inline-flex" : "none";
-        retryAllBtn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> 重试失败 (${error})`;
+        retryAllBtn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> 重试 (${error})`;
     }
 
     // 总进度条
@@ -1477,9 +1595,31 @@ function renderTaskManagerUI() {
         overallBar.style.width = `${percent}%`;
     }
 
-    // 最小化气泡文字同步
-    const bubbleText = document.getElementById("tmBubbleText");
-    if (bubbleText) bubbleText.textContent = `下载管理 (${success}/${total})`;
+    const activeTasks = window.taskQueue.filter(_tmIsActive);
+    const historyItems = _tmHistoryItems();
+
+    // 徽章：优先反映"还要处理的量"，全处理完才退化为历史条数
+    if (totalBadge) {
+        totalBadge.textContent = activeTasks.length
+            ? `${activeTasks.length} 项进行中`
+            : (historyItems.length ? `历史 ${historyItems.length}` : "0 项");
+    }
+    if (navBadge) {
+        if (activeTasks.length) {
+            navBadge.style.display = "inline-block";
+            navBadge.textContent = activeTasks.length;
+        } else {
+            navBadge.style.display = "none";
+        }
+    }
+
+    // 历史区的结构签名（含展开状态）与条数：只算一次，
+    // 供 _tmSignature 与 updateTaskBubble 复用（两者都在进度事件里高频调用）
+    window._tmHistorySig = `${window._tmHistoryExpanded ? 1 : 0}|`
+        + historyItems.map(h => `${h.id}:${h.status}`).join(',');
+    window._tmHistoryCount = historyItems.length;
+
+    updateTaskBubble();
 
     // 结构未变（只是进度在走）：绝不重建 DOM，只原地刷进度，保证节点稳定可点
     const signature = _tmSignature();
@@ -1489,77 +1629,155 @@ function renderTaskManagerUI() {
     }
     window._tmStructureSignature = signature;
 
-    if (total === 0) {
+    if (total === 0 && historyItems.length === 0) {
         listEl.innerHTML = `
             <div style="text-align: center; color: var(--text-dim); padding: 30px 10px; font-size: 12px;">
                 <i class="fa-solid fa-list-check" style="font-size: 24px; margin-bottom: 8px; color: var(--text-muted);"></i>
-                <div>暂无正在进行的批量任务</div>
+                <div>暂无批量任务</div>
+                <div style="margin-top: 6px; font-size: 11px;">下载过的内容会记在这里，重启客户端也不会丢</div>
             </div>
         `;
         return;
     }
 
-    listEl.innerHTML = window.taskQueue.map(t => {
-        let statusLabel = "等待中";
-        let statusClass = "status-waiting";
-        if (t.status === "running") { statusLabel = `下载中 ${t.progress}%`; statusClass = "status-running"; }
-        else if (t.status === "paused") { statusLabel = "已暂停"; statusClass = "status-paused"; }
-        else if (t.status === "success") { statusLabel = "已完成"; statusClass = "status-success"; }
-        else if (t.status === "error") { statusLabel = "失败"; statusClass = "status-error"; }
-        else if (t.status === "canceled") { statusLabel = "已取消"; statusClass = "status-canceled"; }
+    const parts = [];
 
-        // 终止态（完成/失败/已取消）的任务只保留「移除」，不再出现暂停/继续
-        const isActive = t.status === 'running' || t.status === 'waiting' || t.status === 'paused';
-        const canRemove = t.status !== 'running';
+    if (activeTasks.length) {
+        parts.push(`
+            <div class="task-list-group">
+                <span class="task-list-group-title">
+                    <i class="fa-solid fa-bolt" style="color: #38bdf8;"></i> 进行中
+                    <span class="task-list-group-count">· ${activeTasks.length}</span>
+                </span>
+                <span class="task-list-group-hint">新任务在最上方</span>
+            </div>
+        `);
+        // 倒序渲染：刚加入的任务永远出现在最上面，不必往下滚
+        activeTasks.slice().reverse().forEach(t => parts.push(renderTaskCard(t, false)));
+    } else {
+        parts.push(`
+            <div style="color: var(--text-dim); padding: 6px 2px 2px; font-size: 12px;">
+                暂无进行中的任务
+            </div>
+        `);
+    }
 
-        const sizeText = t.totalBytes
-            ? `${formatBytes(t.downloadedBytes || 0)} / ${formatBytes(t.totalBytes)}`
-            : "";
-        const titleTip = t.savePath ? `${t.title} → ${t.savePath}` : t.title;
+    if (historyItems.length) {
+        const expandIcon = window._tmHistoryExpanded ? "fa-chevron-up" : "fa-chevron-down";
+        parts.push(`
+            <div class="task-history-collapse" data-tm-hist="toggle" title="${window._tmHistoryExpanded ? "收起历史记录" : "展开历史记录"}">
+                <span><i class="fa-solid fa-clock-rotate-left"></i> 已完成与历史 · ${historyItems.length}</span>
+                <span class="task-history-collapse-actions">
+                    <span class="task-history-clear" data-tm-hist="clear" title="清空全部历史记录（不会删除已下载的文件）">清空历史</span>
+                    <i class="fa-solid ${expandIcon}"></i>
+                </span>
+            </div>
+        `);
+        if (window._tmHistoryExpanded) {
+            let shown = historyItems;
+            if (historyItems.length > TM_HISTORY_RENDER_LIMIT) {
+                shown = historyItems.slice(0, TM_HISTORY_RENDER_LIMIT);
+                parts.push(`
+                    <div style="color: var(--text-dim); font-size: 11px; padding: 2px 2px 0;">
+                        仅显示最近 ${TM_HISTORY_RENDER_LIMIT} 条（共 ${historyItems.length} 条）
+                    </div>
+                `);
+            }
+            shown.forEach(t => parts.push(renderTaskCard(t, true)));
+        }
+    }
 
-        return `
-            <div class="task-item-card is-${t.status}" id="task_card_${t.id}">
-                <div class="task-item-main">
-                    <span class="task-item-title" title="${escapeHtml(titleTip)}">${escapeHtml(t.title)}</span>
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        <span class="task-item-size" data-task-size="${t.id}">${sizeText}</span>
-                        <span class="task-status-badge ${statusClass}" data-task-badge="${t.id}">${statusLabel}</span>
-                        <div class="task-item-actions">
-                            ${t.status === 'running' ? `
-                            <button class="btn-task-action" data-task-action="pause" data-task-id="${t.id}" title="暂停此任务">
-                                <i class="fa-solid fa-pause"></i>
-                            </button>` : ''}
-                            ${t.status === 'paused' || t.status === 'waiting' ? `
-                            <button class="btn-task-action" data-task-action="resume" data-task-id="${t.id}" title="开始/继续此任务">
-                                <i class="fa-solid fa-play"></i>
-                            </button>` : ''}
-                            ${t.status === 'error' ? `
-                            <button class="btn-task-action" data-task-action="retry" data-task-id="${t.id}" title="重试此任务">
-                                <i class="fa-solid fa-arrows-rotate"></i>
-                            </button>` : ''}
-                            ${t.status === 'success' && t.savePath ? `
-                            <button class="btn-task-action" data-task-action="reveal" data-task-id="${t.id}" title="在访达中显示此文件">
-                                <i class="fa-solid fa-folder-open"></i>
-                            </button>` : ''}
-                            ${isActive ? `
-                            <button class="btn-task-action is-danger" data-task-action="cancel" data-task-id="${t.id}" title="取消此任务（已下载的分片会丢弃）">
-                                <i class="fa-solid fa-xmark"></i>
-                            </button>` : ''}
-                            ${!isActive && canRemove ? `
-                            <button class="btn-task-action" data-task-action="remove" data-task-id="${t.id}" title="从列表移除">
-                                <i class="fa-solid fa-trash-can"></i>
-                            </button>` : ''}
-                        </div>
+    listEl.innerHTML = parts.join("");
+}
+
+// 时间戳 → 「今天 15:50」/「09-23 15:50」，历史条目用
+function _tmFormatTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return "";
+    const p = (n) => String(n).padStart(2, "0");
+    const now = new Date();
+    const sameDay = d.getFullYear() === now.getFullYear()
+        && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    return sameDay ? `今天 ${hm}` : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+}
+
+// 渲染单张任务卡片。活跃区与历史区共用，避免两套模板各自漂移。
+// isHistory 只会影响视觉（更暗）与可用动作（历史条目没有真正的后端任务，
+// 只能"定位文件 / 从历史移除"）。
+function renderTaskCard(t, isHistory) {
+    let statusLabel = "等待中";
+    let statusClass = "status-waiting";
+    if (t.status === "running") { statusLabel = `下载中 ${t.progress}%`; statusClass = "status-running"; }
+    else if (t.status === "paused") { statusLabel = "已暂停"; statusClass = "status-paused"; }
+    else if (t.status === "success") { statusLabel = "已完成"; statusClass = "status-success"; }
+    else if (t.status === "error") { statusLabel = "失败"; statusClass = "status-error"; }
+    else if (t.status === "canceled") { statusLabel = "已取消"; statusClass = "status-canceled"; }
+
+    // 只有真正的活动任务（等待/下载中/已暂停）才有暂停/继续/取消
+    const cardActive = t.status === 'running' || t.status === 'waiting' || t.status === 'paused';
+    // 历史条目是"只读"的：没有后端任务可操作，只能定位文件或从历史里移除
+    const canRemove = !isHistory && t.status !== 'running';
+
+    const sizeText = t.totalBytes
+        ? `${formatBytes(t.downloadedBytes || 0)} / ${formatBytes(t.totalBytes)}`
+        : (t.sizeBytes ? formatBytes(t.sizeBytes) : "");
+    const titleTip = t.savePath ? `${t.title} → ${t.savePath}` : t.title;
+
+    const platformTag = isHistory && t.platform && t.platform !== 'media'
+        ? `<span class="task-item-platform">${escapeHtml(t.platform)}</span>` : "";
+    const timeTag = isHistory && t.finishedAt
+        ? `<span class="task-item-time">${_tmFormatTime(t.finishedAt)}</span>` : "";
+
+    return `
+        <div class="task-item-card is-${t.status}${isHistory ? ' is-history' : ''}" id="task_card_${t.id}">
+            <div class="task-item-main">
+                <span class="task-item-title" title="${escapeHtml(titleTip)}">${escapeHtml(t.title)}</span>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    ${platformTag}
+                    ${timeTag}
+                    <span class="task-item-size" data-task-size="${t.id}">${sizeText}</span>
+                    <span class="task-status-badge ${statusClass}" data-task-badge="${t.id}">${statusLabel}</span>
+                    <div class="task-item-actions">
+                        ${t.status === 'running' ? `
+                        <button class="btn-task-action" data-task-action="pause" data-task-id="${t.id}" title="暂停此任务">
+                            <i class="fa-solid fa-pause"></i>
+                        </button>` : ''}
+                        ${t.status === 'paused' || t.status === 'waiting' ? `
+                        <button class="btn-task-action" data-task-action="resume" data-task-id="${t.id}" title="开始/继续此任务">
+                            <i class="fa-solid fa-play"></i>
+                        </button>` : ''}
+                        ${t.status === 'error' && !isHistory ? `
+                        <button class="btn-task-action" data-task-action="retry" data-task-id="${t.id}" title="重试此任务">
+                            <i class="fa-solid fa-arrows-rotate"></i>
+                        </button>` : ''}
+                        ${t.status === 'success' && t.savePath ? `
+                        <button class="btn-task-action" data-task-action="reveal" data-task-id="${t.id}" title="在访达中显示此文件">
+                            <i class="fa-solid fa-folder-open"></i>
+                        </button>` : ''}
+                        ${cardActive ? `
+                        <button class="btn-task-action is-danger" data-task-action="cancel" data-task-id="${t.id}" title="取消此任务（已下载的分片会丢弃）">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>` : ''}
+                        ${isHistory ? `
+                        <button class="btn-task-action" data-task-action="forget" data-task-id="${t.id}" title="从历史记录中移除（不删除文件）">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>` : ''}
+                        ${canRemove ? `
+                        <button class="btn-task-action" data-task-action="remove" data-task-id="${t.id}" title="从列表移除">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>` : ''}
                     </div>
                 </div>
-                <div class="task-item-progress-track">
-                    <div class="task-item-progress-bar" data-task-bar="${t.id}" style="width: ${t.progress || 0}%;"></div>
-                </div>
-                ${t.status === 'error' && t.errorMsg ? `
-                <div class="task-item-error" title="${escapeHtml(t.errorMsg)}">${escapeHtml(t.errorMsg)}</div>` : ''}
             </div>
-        `;
-    }).join("");
+            <div class="task-item-progress-track">
+                <div class="task-item-progress-bar" data-task-bar="${t.id}" style="width: ${t.progress || 0}%;"></div>
+            </div>
+            ${t.status === 'error' && t.errorMsg ? `
+            <div class="task-item-error" title="${escapeHtml(t.errorMsg)}">${escapeHtml(t.errorMsg)}</div>` : ''}
+        </div>
+    `;
 }
 
 // 任务卡片上的操作按钮：事件委派。
@@ -1581,10 +1799,33 @@ function renderTaskManagerUI() {
         else if (action === "reveal") revealTaskFile(taskId);
         else if (action === "cancel") cancelTask(taskId);
         else if (action === "remove") removeTask(taskId);
+        else if (action === "forget") forgetHistoryItem(taskId);
     };
 
+    // 分区标题行上的操作（展开/收起历史、清空历史）。
+    // 与任务按钮同样走 pointerdown：这一行也在重建区域内，click 会被重渲染吃掉。
+    const runGroupAction = (el) => {
+        const act = el.dataset.tmHist;
+        if (act === "toggle") {
+            window._tmHistoryExpanded = !window._tmHistoryExpanded;
+            renderTaskManagerUI();
+        } else if (act === "clear") {
+            clearDownloadHistory();
+        }
+    };
+
+    const resolve = (e, attr) => (e.target && e.target.closest ? e.target.closest(`[data-${attr}]`) : null);
+
     listEl.addEventListener("pointerdown", (e) => {
-        const btn = e.target && e.target.closest ? e.target.closest("[data-task-action]") : null;
+        const groupEl = resolve(e, "tm-hist");
+        if (groupEl) {
+            if (e.pointerType === "mouse" && e.button !== 0) return;
+            e.stopPropagation();
+            // 整行可点，但"清空历史"要按自己的语义走，不能被展开动作吞掉
+            runGroupAction(groupEl);
+            return;
+        }
+        const btn = resolve(e, "task-action");
         if (!btn) return;
         if (e.pointerType === "mouse" && e.button !== 0) return;
         e.stopPropagation();
@@ -1593,7 +1834,7 @@ function renderTaskManagerUI() {
     });
 
     listEl.addEventListener("click", (e) => {
-        const btn = e.target && e.target.closest ? e.target.closest("[data-task-action]") : null;
+        const btn = resolve(e, "task-action");
         if (!btn || handledByPointer.has(btn)) return;
         e.stopPropagation();
         runAction(btn);
@@ -1777,6 +2018,7 @@ async function runSingleTask(task) {
 
         task.status = 'success';
         task.progress = 100;
+        task.finishedAt = Date.now() / 1000;   // 历史区按完成时间倒序
         renderTaskManagerUI();
     } catch (err) {
         if (err.name === 'AbortError') {
@@ -1785,6 +2027,7 @@ async function runSingleTask(task) {
         } else {
             task.status = 'error';
             task.errorMsg = err.message || "下载失败";
+            task.finishedAt = Date.now() / 1000;
         }
     } finally {
         task.abortCtrl = null;
@@ -1936,7 +2179,74 @@ function removeTask(taskId) {
     if (!task) return;
     if (task.status === 'running') return;          // 运行中的任务请先取消
     window.taskQueue = window.taskQueue.filter(t => t.id !== taskId);
+    // 终态任务在历史里也有一条同名记录（后端落盘的）。列表里移除了却还在历史里
+    // 冒出来，看起来像"移除按钮没生效"，所以同步遗忘。
+    if (_tmTerminal(task)) deleteHistoryRecords([taskId]);
     renderTaskManagerUI();
+}
+
+// ==========================================================================
+// 下载历史
+// ==========================================================================
+
+// 从后端拉取持久化历史（客户端启动时调用一次）
+async function loadDownloadHistory() {
+    try {
+        const resp = await fetch("/api/history");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        window.taskHistory = Array.isArray(data.entries) ? data.entries : [];
+        // 历史变了，结构签名必须作废，否则界面不会重建
+        window._tmStructureSignature = null;
+        renderTaskManagerUI();
+        updateTaskBubble();
+    } catch (e) {
+        console.warn("加载下载历史失败:", e);
+    }
+}
+
+// 从历史里移除单条（只删记录，不动文件）
+async function forgetHistoryItem(taskId) {
+    window.taskHistory = window.taskHistory.filter(h => h.id !== taskId);
+    // 会话内还没被清掉的任务也一并从列表移除，避免"删了还在"
+    window.taskQueue = window.taskQueue.filter(t => t.id !== taskId);
+    renderTaskManagerUI();
+    await deleteHistoryRecords([taskId]);
+}
+
+async function deleteHistoryRecords(ids) {
+    if (!ids || !ids.length) return;
+    try {
+        const resp = await fetch("/api/history/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+        });
+        if (!resp.ok) throw new Error("删除失败");
+    } catch (e) {
+        console.warn("删除历史记录失败:", e);
+        showToast("删除历史记录失败，请稍后再试", "error");
+    }
+}
+
+async function clearDownloadHistory() {
+    if (!window.taskHistory.length) {
+        showToast("暂无历史记录", "info");
+        return;
+    }
+    const count = window.taskHistory.length;
+    window.taskHistory = [];
+    window._tmStructureSignature = null;
+    renderTaskManagerUI();
+    try {
+        const resp = await fetch("/api/history/clear", { method: "POST" });
+        if (!resp.ok) throw new Error("清空失败");
+        showToast(`已清空 ${count} 条历史记录（文件未被删除）`, "info");
+    } catch (e) {
+        console.warn("清空历史失败:", e);
+        showToast("清空历史失败，请稍后再试", "error");
+        loadDownloadHistory();   // 失败就把真实状态拉回来，别让界面说谎
+    }
 }
 
 // 取消全部：把所有活动任务（等待/下载中/已暂停）一次性取消
@@ -1973,7 +2283,10 @@ async function cancelAllTasks() {
 // 在访达/资源管理器中定位已下载的文件（只对原生落盘的任务有意义）
 async function revealTaskFile(taskId) {
     const task = window.taskQueue.find(t => t.id === taskId);
-    const path = task && task.savePath;
+    // 历史条目（重启后从 history.json 恢复的那种）不在 taskQueue 里，
+    // 但它的落盘路径是记在历史里的，照样能定位。
+    const historyEntry = task ? null : window.taskHistory.find(h => h.id === taskId);
+    const path = (task && task.savePath) || (historyEntry && historyEntry.save_path);
     if (!path) {
         showToast("该任务没有可定位的本地文件", "error");
         return;
@@ -2143,14 +2456,25 @@ function syncConcurrencySelect() {
 }
 
 function clearCompletedTasks() {
-    fetch("/api/server/tasks/clear", { method: "POST" }).catch(() => {});
+    const terminalIds = window.taskQueue
+        .filter(t => ['success', 'canceled', 'error'].includes(t.status))
+        .map(t => t.id);
+    // 后端 clear_completed 会顺带删掉这些任务的历史记录，前端本地历史也要同步移除，
+    // 否则界面会停在"清空前的历史"，用户以为按钮没生效。
+    window.taskHistory = window.taskHistory.filter(h => !terminalIds.includes(h.id));
     // 与后端 clear_completed 的范围保持一致（success / canceled / error）。
     // 否则前端会残留后端已不存在的任务，点「重试」会直接 404。
     window.taskQueue = window.taskQueue.filter(
         t => !['success', 'canceled', 'error'].includes(t.status)
     );
     renderTaskManagerUI();
-    showToast("已清空全部已完成任务", "info");
+    if (!terminalIds.length) {
+        showToast("当前没有已完成/失败/已取消的任务", "info");
+        return;
+    }
+    fetch("/api/server/tasks/clear", { method: "POST" })
+        .catch(() => showToast("清空服务端任务失败，请稍后再试", "error"));
+    showToast(`已清空 ${terminalIds.length} 条完成记录（含历史）`, "info");
 }
 
 // 批量下载当前选集所有分集入口

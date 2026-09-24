@@ -8,9 +8,9 @@
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
-    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.3.0">
-    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.3.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.5.3.0">
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.4.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.4.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.5.4.0">
 </head>
 
 <body>
@@ -214,7 +214,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.5.3.0</span>
+                    <span class="badge badge-version">v2.5.4.0</span>
                 </div>
             </div>
         </footer>
@@ -345,7 +345,7 @@
                     <i class="fa-solid fa-ban"></i> 取消全部
                 </button>
                 <button class="btn-tm-ctrl" id="btnRetryFailed" onclick="retryAllFailedTasks()" style="display: none;" title="重新提交全部失败任务">
-                    <i class="fa-solid fa-arrows-rotate"></i> 重试失败
+                    <i class="fa-solid fa-arrows-rotate"></i> 重试
                 </button>
                 <button class="btn-tm-ctrl" onclick="clearCompletedTasks()" title="清空已完成">
                     <i class="fa-solid fa-trash-can"></i> 清除完成
@@ -413,16 +413,17 @@
         </div>
     </div>
 
-    <!-- 最小化任务气泡 -->
-    <div class="task-manager-bubble" id="taskManagerBubble" style="display: none;" onclick="toggleTaskManager(true)" title="点击展开任务管理器">
-        <i class="fa-solid fa-cloud-arrow-down fa-bounce"></i>
-        <span class="tm-bubble-text" id="tmBubbleText">下载管理 (0/0)</span>
+    <!-- 任务管理入口气泡（常驻，按状态分级显示） -->
+    <div class="task-manager-bubble is-idle" id="taskManagerBubble" style="display: none;" onclick="toggleTaskManager(true)" title="打开任务管理器">
+        <i class="fa-solid fa-cloud-arrow-down" id="tmBubbleIcon"></i>
+        <span class="tm-bubble-text" id="tmBubbleText">下载管理</span>
+        <span class="tm-bubble-badge" id="tmBubbleBadge" style="display: none;">0</span>
     </div>
 
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.5.3.0"></script>
+    <script src="/static/js/app.js?v=2.5.4.0"></script>
 </body>
 
 </html>

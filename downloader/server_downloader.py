@@ -20,6 +20,7 @@ from downloader.paths import (
     save_local_dir,
     save_max_concurrent,
 )
+from downloader.history import delete_history, record_history
 from downloader.http_util import bilibili_cookie, download_headers
 from downloader.preview import preview_dir
 from extractors.media_urls import build_download_candidates, host_of
@@ -68,6 +69,7 @@ class ServerTask(BaseModel):
     audio_url: Optional[str] = None
     sessdata: Optional[str] = None
     channel: str = "server"  # server: NAS/服务端归档 | local: 桌面端本地保存
+    platform: str = "media"  # 来源平台（bilibili / douyin / xhs ...），历史记录里要展示
     direct_backup_urls: List[str] = Field(default_factory=list, description="视频轨备用直链")
     audio_backup_urls: List[str] = Field(default_factory=list, description="音频轨备用直链")
     status: str = "waiting"  # waiting | running | paused | success | error
@@ -330,6 +332,7 @@ class ServerDownloadManager:
             audio_url=audio_url,
             sessdata=sessdata,
             channel=channel,
+            platform=platform or "media",
             direct_backup_urls=list(direct_backup_urls or []),
             audio_backup_urls=list(audio_backup_urls or []),
             status="waiting",
@@ -422,12 +425,15 @@ class ServerDownloadManager:
                     f"[{task.id}] 下载完成 | {task.filename} | {_fmt_size(final_size)} | "
                     f"耗时 {time.time() - task.created_at:.1f}s | {task.save_path}"
                 )
+                self._record_history(task, final_size)
                 self._notify_listeners("task_success", task.dict())
             except asyncio.CancelledError:
                 if task.status == "canceled":
                     # 用户主动取消：清理分片
                     self._cleanup_temp_files(task)
                     logger.info(f"[{task.id}] 已取消 | {task.filename}")
+                    # 历史记录统一在 cancel_task 里写：那里是"用户取消"的唯一权威入口，
+                    # 且能覆盖"任务还在排队（waiting）就被取消"这种没有协程在跑的情况。
                     self._notify_listeners("task_canceled", task.dict())
                 else:
                     # 暂停：**保留分片**，继续时从断点续传
@@ -447,6 +453,7 @@ class ServerDownloadManager:
                 # 残片的回收交给 clear_completed（见下）。
                 task.status = "error"
                 task.error = str(e)
+                self._record_history(task)
                 self._notify_listeners("task_error", task.dict())
         finally:
             if claimed:
@@ -766,7 +773,14 @@ class ServerDownloadManager:
     def cancel_task(self, task_id: str) -> bool:
         if task_id in self.tasks:
             task = self.tasks[task_id]
+            # 只取消活动任务：对已完成/已取消的任务"再取消一次"会把终态改坏，
+            # 也会往历史里塞重复条目（与 pause_task 同款防护）。
+            if task.status not in ("waiting", "running", "paused"):
+                return False
             task.status = "canceled"
+            # 用户取消是唯一权威入口，历史在这里写：能覆盖"还在排队就被取消"
+            # （此时没有任何协程在跑，CancelledError 分支根本不会执行）
+            self._record_history(task)
             self._notify_listeners("task_canceled", task.dict())
             return True
         return False
@@ -779,7 +793,35 @@ class ServerDownloadManager:
             if task.status != "success":
                 self._cleanup_temp_files(task)
             del self.tasks[tid]
+        # 列表清空时同步清掉这些任务的历史：否则界面上刚"清空"，历史区里又冒出来，
+        # 看起来像按钮没生效（历史与列表在界面上是同一块区域，必须同进同退）。
+        if to_del:
+            delete_history(to_del)
         return len(to_del)
+
+    def _record_history(self, task: "ServerTask", size_bytes: int = 0) -> None:
+        """把终态任务写进下载历史。失败不抛异常（历史丢一条远好过任务被判失败）"""
+        try:
+            if not size_bytes:
+                size_bytes = task.downloaded_bytes or 0
+                if task.status == "success" and task.save_path and os.path.exists(task.save_path):
+                    size_bytes = os.path.getsize(task.save_path)
+            record_history(
+                task_id=task.id,
+                title=task.title or task.filename,
+                filename=task.filename,
+                save_path=task.save_path or "",
+                status=task.status,
+                size_bytes=size_bytes,
+                platform=task.platform or "",
+                channel=task.channel,
+                url=task.url or task.direct_url or "",
+                created_at=task.created_at,
+                duration=max(0.0, time.time() - (task.created_at or time.time())),
+                error=task.error or "",
+            )
+        except Exception as e:
+            logger.warning(f"[{task.id}] 写入下载历史失败: {e}")
 
     def subscribe(self) -> asyncio.Queue:
         q = asyncio.Queue()

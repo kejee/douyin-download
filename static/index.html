@@ -8,9 +8,9 @@
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
-    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.1.0">
-    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.5.1.0">
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.2.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.2.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.5.2.0">
 </head>
 
 <body>
@@ -214,7 +214,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.5.1.0</span>
+                    <span class="badge badge-version">v2.5.2.0</span>
                 </div>
             </div>
         </footer>
@@ -376,6 +376,9 @@
                 <button type="button" class="btn-dest-toggle" onclick="openDownloadFolder()" title="在文件管理器中打开">
                     <i class="fa-solid fa-arrow-up-right-from-square"></i> 打开目录
                 </button>
+                <button type="button" class="btn-dest-toggle" id="btnPreviewCache" onclick="clearPreviewCache()" title="预览会把视频完整缓存在本机（缓存目录不在下载目录里）。点击可立即清理，缓存会在下次预览时自动重建。">
+                    <i class="fa-solid fa-broom"></i> 预览缓存 <span id="previewCacheSize">—</span>
+                </button>
             </div>
         </div>
         <div class="task-manager-summary">
@@ -404,7 +407,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.5.1.0"></script>
+    <script src="/static/js/app.js?v=2.5.2.0"></script>
 </body>
 
 </html>

@@ -284,6 +284,30 @@ function formatDuration(seconds) {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
+// 格式化体积（用于任务卡片的"已下载/总量"与缓存占用）
+function formatBytes(bytes) {
+    const num = Number(bytes) || 0;
+    if (num < 1024) return `${num}B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = num / 1024;
+    let i = 0;
+    while (value >= 1024 && i < units.length - 1) {
+        value /= 1024;
+        i++;
+    }
+    return `${value.toFixed(value >= 100 ? 0 : 1)}${units[i]}`;
+}
+
+// 转义 HTML 属性/文本：视频标题来自各平台，可能含 < > " ' ，直接拼进模板会破坏结构
+function escapeHtml(value) {
+    return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
 // 复制到剪贴板
 async function copyToClipboard(text, label = "链接") {
     try {
@@ -319,19 +343,23 @@ function backupsForUrl(url) {
 
 // 队列里是否已有指向同一目标文件的活动任务
 // （两个任务写同一个 save_path 会并发写同一临时文件，导致内容交错甚至丢文件）
-function findActiveTaskByFilename(filename) {
+// 目标路径 = 子目录 + 文件名，所以两者都要比，否则不同图集里的同名图片会被误判为重复。
+function findActiveTaskByFilename(filename, subdir = null) {
     if (!filename) return null;
     return window.taskQueue.find(
-        t => t.filename === filename && ['waiting', 'running', 'paused'].includes(t.status)
+        t => t.filename === filename
+            && (t.subdir || null) === (subdir || null)
+            && ['waiting', 'running', 'paused'].includes(t.status)
     ) || null;
 }
 
 // 触发下载 (统一接入任务管理器与真实流式进度)
-function triggerDownload(url, filename) {
+// options.subdir: 目标子目录（同一作品产生多个文件时归到一个文件夹，如图集/合集）
+function triggerDownload(url, filename, options = {}) {
     if (!url) return;
     const safeFilename = filename || "download_media.mp4";
 
-    const dup = findActiveTaskByFilename(safeFilename);
+    const dup = findActiveTaskByFilename(safeFilename, options.subdir || null);
     if (dup) {
         showToast(`「${safeFilename}」已在下载队列中，未重复添加`, "info");
         toggleTaskManager(true);
@@ -346,6 +374,7 @@ function triggerDownload(url, filename) {
         filename: safeFilename,
         directUrl: url,
         directBackups: backupsForUrl(url),
+        subdir: options.subdir || null,
         status: 'waiting',
         progress: 0,
         errorMsg: null,
@@ -440,6 +469,8 @@ function renderResult(data) {
     if (resultCard) resultCard.style.display = "block";
     const { platform, platform_name, type, title, author, statistics, music, cover, video, images, id } = data;
     window.currentMediaData = data;
+    // 每次解析都重置图集上下文，避免旧作品的标题/图片地址被新页面误用
+    window.pendingGallery = null;
     const cleanTitle = title ? title.replace(/[\r\n]+/g, " ").slice(0, 60) : `${platform || 'media'}_${id}`;
 
     let mediaHtml = "";
@@ -496,7 +527,7 @@ function renderResult(data) {
                 <button type="button" class="preview-prepare-overlay" id="previewOverlay" onclick="startPreviewPrepare()">
                     <span class="preview-play-btn"><i class="fa-solid fa-play"></i></span>
                     <span class="preview-prepare-text" id="previewPrepareText">点击准备预览</span>
-                    <span class="preview-prepare-hint">点击后先在本机混流为完整文件（可拖动进度条、可重播）</span>
+                    <span class="preview-prepare-hint">B站是音视频分离的，会先在本机完整缓存这段视频再播放（之后可拖动进度、可重播，缓存可清理）</span>
                     <span class="preview-prepare-track"><span class="preview-prepare-bar" id="previewPrepareBar"></span></span>
                 </button>` : ''}
             </div>
@@ -592,12 +623,15 @@ function renderResult(data) {
         `;
     } else if (type === "images") {
         // 图集展示 (优雅平铺网格，绝不重叠)
+        // 图片地址与标题存到 JS 变量里，按钮只传下标 —— 标题里的引号/尖括号
+        // 会直接破坏 onclick 属性（中文标题里很常见），这样彻底避开该隐患。
+        window.pendingGallery = { images: images, title: cleanTitle };
         const galleryItems = images.map((imgUrl, idx) => `
-            <div class="gallery-item" title="点击查看高清原图" onclick="openImagePreview('${imgUrl}')">
+            <div class="gallery-item" title="点击查看高清原图" onclick="openGalleryImage(${idx})">
                 <img src="${imgUrl}" alt="图片 ${idx + 1}" loading="lazy" referrerpolicy="no-referrer">
                 <div class="gallery-item-action" onclick="event.stopPropagation()">
                     <span class="gallery-idx">#${idx + 1}</span>
-                    <button class="btn-gallery-dl" onclick="triggerDownload('${imgUrl}', '${cleanTitle}_图${idx + 1}.jpg')" title="下载此图">
+                    <button class="btn-gallery-dl" onclick="downloadSingleImage(${idx})" title="下载此图">
                         <i class="fa-solid fa-download"></i> 保存
                     </button>
                 </div>
@@ -618,7 +652,7 @@ function renderResult(data) {
 
         actionsHtml = `
             <div class="download-action-grid">
-                <button class="btn-primary grid-span-2" onclick="downloadAllImages(${JSON.stringify(images).replace(/"/g, '&quot;')}, '${cleanTitle}')">
+                <button class="btn-primary grid-span-2" onclick="downloadAllImages()">
                     <i class="fa-solid fa-download"></i> 批量下载全部高清原图 (${images.length}张)
                 </button>
                 ${music && music.url ? `
@@ -880,6 +914,7 @@ async function startPreviewPrepare() {
         player.load();
         overlay.style.display = "none";
         player.play().catch(() => {});                    // 点击即手势，通常允许播放
+        refreshPreviewCacheInfo();                        // 缓存体积变了，同步到界面
     };
 
     try {
@@ -902,10 +937,16 @@ async function startPreviewPrepare() {
             await new Promise(r => setTimeout(r, 800));
             if (token !== window.previewJobToken) return;
             const st = await (await fetch(`/api/preview/${encodeURIComponent(key)}/status`)).json();
+            if (token !== window.previewJobToken) return;   // 取状态期间可能已切换视频
             if (st.ready) { attach(key); return; }
             if (st.status === "error") throw new Error(st.error || "混流失败");
             setBar(st.progress || 0);
-            setText(`正在本机准备预览… ${st.progress || 0}%`);
+            // 预览是"完整缓存后才播放"，把体积进度显示出来，避免误以为是卡住了
+            if (st.total_bytes) {
+                setText(`正在本机缓存 ${formatBytes(st.downloaded_bytes || 0)} / ${formatBytes(st.total_bytes)}（${st.progress || 0}%）`);
+            } else {
+                setText(`正在本机准备预览… ${st.progress || 0}%`);
+            }
         }
         throw new Error("准备超时");
     } catch (e) {
@@ -1077,6 +1118,7 @@ function applyDesktopMode() {
 
     const bar = document.getElementById("desktopSaveBar");
     if (bar) bar.style.display = "flex";
+    refreshPreviewCacheInfo();
     const destRow = document.getElementById("taskDestinationRow");
     if (destRow) destRow.style.display = "none";
     const navBtn = document.getElementById("openSaveDirBtn");
@@ -1265,9 +1307,15 @@ async function initServerArchiving() {
                             if (data.status !== "running") localTask.pendingPause = false;
                         }
                         localTask.progress = data.progress;
+                        // 体积进度（后端逐块统计，用来判断"是不是卡住了"）
+                        if (typeof data.total_bytes === "number") {
+                            localTask.totalBytes = data.total_bytes;
+                            localTask.downloadedBytes = data.downloaded_bytes;
+                        }
                         // 落盘绝对路径（供「在访达中显示」定位文件）
                         if (data.save_path) localTask.savePath = data.save_path;
                         renderTaskManagerUI();
+                        notifyTasksSettled();
                     } else if (event === "task_added" || data.status === "running") {
                         window.taskQueue.push({
                             id: data.id,
@@ -1297,6 +1345,7 @@ function toggleTaskManager(show = true) {
         drawer.style.display = "flex";
         bubble.style.display = "none";
         renderTaskManagerUI();
+        refreshPreviewCacheInfo();
     } else {
         drawer.style.display = "none";
         // 只要队列中有任务，关闭时常驻显示悬浮气泡，方便随时再次展开
@@ -1351,6 +1400,12 @@ function _tmPatchProgress() {
     window.taskQueue.forEach(t => {
         const bar = document.querySelector(_tmSelector(t.id, "task-bar"));
         if (bar) bar.style.width = `${t.progress || 0}%`;
+        const sizeEl = document.querySelector(_tmSelector(t.id, "task-size"));
+        if (sizeEl) {
+            sizeEl.textContent = t.totalBytes
+                ? `${formatBytes(t.downloadedBytes || 0)} / ${formatBytes(t.totalBytes)}`
+                : "";
+        }
         if (t.status !== 'running') return;
         const badge = document.querySelector(_tmSelector(t.id, "task-badge"));
         if (badge) badge.textContent = `下载中 ${t.progress || 0}%`;
@@ -1438,11 +1493,17 @@ function renderTaskManagerUI() {
         const isActive = t.status === 'running' || t.status === 'waiting' || t.status === 'paused';
         const canRemove = t.status !== 'running';
 
+        const sizeText = t.totalBytes
+            ? `${formatBytes(t.downloadedBytes || 0)} / ${formatBytes(t.totalBytes)}`
+            : "";
+        const titleTip = t.savePath ? `${t.title} → ${t.savePath}` : t.title;
+
         return `
             <div class="task-item-card is-${t.status}" id="task_card_${t.id}">
                 <div class="task-item-main">
-                    <span class="task-item-title" title="${t.title}">${t.title}</span>
+                    <span class="task-item-title" title="${escapeHtml(titleTip)}">${escapeHtml(t.title)}</span>
                     <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="task-item-size" data-task-size="${t.id}">${sizeText}</span>
                         <span class="task-status-badge ${statusClass}" data-task-badge="${t.id}">${statusLabel}</span>
                         <div class="task-item-actions">
                             ${t.status === 'running' ? `
@@ -1475,6 +1536,8 @@ function renderTaskManagerUI() {
                 <div class="task-item-progress-track">
                     <div class="task-item-progress-bar" data-task-bar="${t.id}" style="width: ${t.progress || 0}%;"></div>
                 </div>
+                ${t.status === 'error' && t.errorMsg ? `
+                <div class="task-item-error" title="${escapeHtml(t.errorMsg)}">${escapeHtml(t.errorMsg)}</div>` : ''}
             </div>
         `;
     }).join("");
@@ -1570,6 +1633,7 @@ async function submitTaskToBackend(task) {
                 audio_backup_urls: task.audioBackups || [],
                 url: task.share_url || null,
                 season_title: task.seasonTitle || null,
+                subdir: task.subdir || null,
                 platform: task.platform || "media",
                 page_num: task.pageNum || null,
                 sessdata: getBiliSessdata() || null,
@@ -1708,6 +1772,7 @@ async function runSingleTask(task) {
         renderTaskManagerUI();
         // 继续调度队列中的下一个任务
         scheduleTaskQueue();
+        notifyTasksSettled();
     }
 }
 
@@ -1948,6 +2013,71 @@ function resumeAllTasks() {
     showToast("已继续全部批量下载任务", "success");
 }
 
+// 任务全部结束时的汇总提示。
+// 只在"曾经有活动任务"且"现在全部结束"这一个转折点提示一次，避免刷屏。
+function notifyTasksSettled() {
+    const active = window.taskQueue.filter(t => ['running', 'waiting', 'paused'].includes(t.status)).length;
+    if (active > 0) {
+        window._hasSeenActiveTask = true;
+        return;
+    }
+    if (!window._hasSeenActiveTask) return;
+    window._hasSeenActiveTask = false;
+
+    const done = window.taskQueue.filter(t => t.status === 'success').length;
+    const failed = window.taskQueue.filter(t => t.status === 'error').length;
+    const canceled = window.taskQueue.filter(t => t.status === 'canceled').length;
+
+    if (failed > 0) {
+        showToast(`下载结束：成功 ${done} 个，失败 ${failed} 个（卡片上有失败原因，可重试）`, "error");
+    } else if (done > 0) {
+        showToast(`全部下载完成，共 ${done} 个文件`, "success");
+    } else if (canceled > 0) {
+        showToast("已取消全部任务", "info");
+    }
+}
+
+// ==========================================================================
+// 预览缓存：预览是"先把整段视频缓存在本机再播放"，因此需要让占用可见、可一键清理
+// （缓存目录不在下载目录里，用户平时看不到它）
+// ==========================================================================
+async function refreshPreviewCacheInfo() {
+    const label = document.getElementById("previewCacheSize");
+    if (!label || !window.isDesktop) return;
+    try {
+        const resp = await fetch("/api/preview/cache");
+        if (!resp.ok) return;
+        const info = await resp.json();
+        label.textContent = info.file_count
+            ? `${formatBytes(info.total_bytes)} · ${info.file_count} 个`
+            : "空";
+    } catch (e) {
+        console.warn("读取预览缓存占用失败:", e);
+    }
+}
+
+async function clearPreviewCache() {
+    const label = document.getElementById("previewCacheSize");
+    const btn = document.getElementById("btnPreviewCache");
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch("/api/preview/cache/clear", { method: "POST" });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data.success === false) throw new Error(data.detail || "清理失败");
+        if (data.removed) {
+            showToast(`已清理预览缓存：${data.removed} 个文件，释放 ${formatBytes(data.freed_bytes)}`, "success");
+        } else {
+            showToast("预览缓存本来就是空的", "info");
+        }
+        if (label) label.textContent = "空";
+    } catch (e) {
+        showToast(e.message || "清理预览缓存失败", "error");
+    } finally {
+        if (btn) btn.disabled = false;
+        refreshPreviewCacheInfo();
+    }
+}
+
 function clearCompletedTasks() {
     fetch("/api/server/tasks/clear", { method: "POST" }).catch(() => {});
     // 与后端 clear_completed 的范围保持一致（success / canceled / error）。
@@ -2106,17 +2236,6 @@ async function refreshCurrentEpisodes() {
     }
 }
 
-// 批量下载图集
-function downloadAllImages(imgList, baseTitle) {
-    if (!imgList || imgList.length === 0) return;
-    showToast(`正在依次触发 ${imgList.length} 张图片下载...`, "info");
-    imgList.forEach((url, i) => {
-        setTimeout(() => {
-            triggerDownload(url, `${baseTitle}_图${i + 1}.jpg`);
-        }, i * 400);
-    });
-}
-
 // 内存混流下载 (统一接入任务管理器与真实流式进度)
 function triggerMuxDownload(videoUrl, audioUrl, filename) {
     if (!videoUrl) {
@@ -2200,7 +2319,7 @@ function onQualitySelectChange(index) {
                 overlay.classList.remove("is-busy", "is-error");
                 if (iconEl) iconEl.className = "fa-solid fa-play";
                 if (textEl) textEl.textContent = "点击准备预览";
-                if (hintEl) hintEl.textContent = "点击后先在本机混流为完整文件（可拖动进度条、可重播）";
+                if (hintEl) hintEl.textContent = "B站是音视频分离的，会先在本机完整缓存这段视频再播放（之后可拖动进度、可重播，缓存可清理）";
                 if (barEl) barEl.style.width = "0%";
             }
         } else {
@@ -2675,6 +2794,36 @@ function parseAndOpenMedia(url) {
 // 说明：桌面客户端的 WebView 里 window.open 不是"开新窗口"，而是把主框架
 // 导航到目标 URL —— 整个操作界面会被一张图片顶掉且无法返回，故改为应用内预览。
 // ==========================================================================
+// 图集：按「作品标题」建子目录归档。
+// 规则统一为：同一作品产出多个文件时才建目录（图集 / B站合集），单个文件平铺。
+function galleryTargetTitle() {
+    const g = window.pendingGallery;
+    return (g && g.title) || "图集";
+}
+
+function openGalleryImage(index) {
+    const g = window.pendingGallery;
+    if (!g || !g.images || !g.images[index]) return;
+    openImagePreview(g.images[index]);
+}
+
+function downloadSingleImage(index) {
+    const g = window.pendingGallery;
+    if (!g || !g.images || !g.images[index]) return;
+    triggerDownload(g.images[index], `${g.title}_图${index + 1}.jpg`, { subdir: galleryTargetTitle() });
+}
+
+function downloadAllImages() {
+    const g = window.pendingGallery;
+    if (!g || !g.images || !g.images.length) return;
+    const title = galleryTargetTitle();
+    showToast(`正在依次加入 ${g.images.length} 张原图（归档到「${title}」文件夹）...`, "info");
+    g.images.forEach((url, i) => {
+        // 逐个错开入队：后端有并发上限，一次性全部提交也会排队，这里只是让顺序更直观
+        setTimeout(() => triggerDownload(url, `${g.title}_图${i + 1}.jpg`, { subdir: title }), i * 300);
+    });
+}
+
 function openImagePreview(url) {
     if (!url) return;
     let box = document.getElementById("imagePreviewBox");
@@ -2718,7 +2867,14 @@ function saveImageFromPreview() {
     if (!url) return;
     let name = decodeURIComponent((url.split("?")[0].split("/").pop() || "image.jpg"));
     if (!/\.[a-zA-Z0-9]{3,4}$/.test(name)) name += ".jpg";
-    triggerDownload(url, name);
+    // 灯箱里的「保存这张」也归到同一作品的子目录，避免批量/单张归档规则不一致
+    const gallery = window.pendingGallery;
+    const inGallery = gallery && gallery.images && gallery.images.includes(url);
+    if (inGallery) {
+        const idx = gallery.images.indexOf(url);
+        name = `${gallery.title}_图${idx + 1}.jpg`;
+    }
+    triggerDownload(url, name, inGallery ? { subdir: galleryTargetTitle() } : undefined);
     closeImagePreview();
     showToast("已加入下载任务", "success");
 }

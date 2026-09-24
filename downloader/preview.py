@@ -70,6 +70,61 @@ def is_ready(key: str) -> bool:
         return False
 
 
+def cache_stats() -> dict:
+    """预览缓存占用（供界面显示与手动清理）"""
+    directory = preview_dir()
+    files = 0
+    total = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".mp4"):
+            continue
+        try:
+            stat = os.stat(os.path.join(directory, name))
+        except OSError:
+            continue
+        files += 1
+        total += stat.st_size
+    return {
+        "dir": directory,
+        "file_count": files,
+        "total_bytes": total,
+        "max_files": MAX_FILES,
+        "max_bytes": MAX_TOTAL_BYTES,
+    }
+
+
+def clear_cache() -> dict:
+    """清空预览缓存，返回删除数量与释放的字节数。
+
+    预览缓存是纯派生数据（随时可由直链重新生成），因此不需要二次确认；
+    正在播放的文件即使被删除，已打开的句柄在类 Unix 系统上依然有效，
+    播放不会中断。
+    """
+    directory = preview_dir()
+    removed = 0
+    freed = 0
+    try:
+        names = list(os.listdir(directory))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".mp4"):
+            continue
+        full = os.path.join(directory, name)
+        try:
+            size = os.path.getsize(full)
+            os.remove(full)
+        except OSError:
+            continue
+        removed += 1
+        freed += size
+    return {"removed": removed, "freed_bytes": freed}
+
+
 def evict_old(keep_key: str = "") -> int:
     """按 mtime 清理旧预览，返回删除数量。
 

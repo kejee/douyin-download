@@ -2,6 +2,7 @@ import os
 import re
 import io
 import asyncio
+import logging
 import zipfile
 import urllib.parse
 from typing import List, Optional
@@ -15,7 +16,9 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.1.0"
+APP_VERSION = "2.5.2.0"
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -455,7 +458,26 @@ async def preview_status(key: str):
         "progress": task.progress,
         "status": task.status,
         "error": task.error,
+        # 让界面能显示「已缓存 xx / 共 yy」——预览是完整落盘后才播放的，
+        # 透明地把这件事告诉用户，避免误以为是逐秒缓冲。
+        "downloaded_bytes": task.downloaded_bytes,
+        "total_bytes": task.total_bytes,
     }
+
+@app.get("/api/preview/cache")
+async def preview_cache_info():
+    """预览缓存占用情况"""
+    return preview.cache_stats()
+
+@app.post("/api/preview/cache/clear")
+async def preview_cache_clear():
+    """清空预览缓存（纯派生数据，随时可由直链重新生成）"""
+    result = preview.clear_cache()
+    logger.info(
+        f"清理预览缓存 | 删除 {result['removed']} 个文件 | "
+        f"释放 {result['freed_bytes'] / 1024 / 1024:.1f}MB"
+    )
+    return {"success": True, **result}
 
 @app.get("/api/preview/{key}/stream")
 async def preview_stream(key: str):

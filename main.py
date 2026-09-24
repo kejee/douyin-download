@@ -16,7 +16,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.2.0"
+APP_VERSION = "2.5.3.0"
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +337,15 @@ async def cancel_server_task(task_id: str):
 async def clear_server_tasks():
     count = server_downloader.clear_completed()
     return {"success": True, "cleared_count": count}
+
+class ConcurrencyRequest(BaseModel):
+    max_concurrent: int
+
+@app.post("/api/server/concurrency")
+async def set_concurrency(req: ConcurrencyRequest):
+    """调整同时下载数（1~8，立即生效并持久化）"""
+    value = await server_downloader.set_max_concurrent(req.max_concurrent)
+    return {"success": True, "max_concurrent": value}
 
 # ==========================================================================
 # 桌面客户端：原生保存（选择目录 + Python 直接落盘，不经过 WebView 下载）

@@ -625,9 +625,17 @@ function renderResult(data) {
         // 图集展示 (优雅平铺网格，绝不重叠)
         // 图片地址与标题存到 JS 变量里，按钮只传下标 —— 标题里的引号/尖括号
         // 会直接破坏 onclick 属性（中文标题里很常见），这样彻底避开该隐患。
-        window.pendingGallery = { images: images, title: cleanTitle };
+        // 每张图带勾选框：默认全选，可只下其中几张。
+        window.pendingGallery = {
+            images: images,
+            title: cleanTitle,
+            selected: new Set(images.map((_, i) => i)),
+        };
         const galleryItems = images.map((imgUrl, idx) => `
             <div class="gallery-item" title="点击查看高清原图" onclick="openGalleryImage(${idx})">
+                <label class="gallery-check" title="勾选后可批量下载" onclick="event.stopPropagation()">
+                    <input type="checkbox" data-gallery-check="${idx}" checked onchange="onGallerySelectChange()">
+                </label>
                 <img src="${imgUrl}" alt="图片 ${idx + 1}" loading="lazy" referrerpolicy="no-referrer">
                 <div class="gallery-item-action" onclick="event.stopPropagation()">
                     <span class="gallery-idx">#${idx + 1}</span>
@@ -641,8 +649,8 @@ function renderResult(data) {
         mediaHtml = `
             <div class="images-gallery-container">
                 <div class="gallery-header">
-                    <span class="gallery-count-badge"><i class="fa-regular fa-images"></i> 共 ${images.length} 张高清原图</span>
-                    <span style="font-size: 11px; color: var(--text-dim);">点击图片预览原图</span>
+                    <span class="gallery-count-badge" id="galleryCountBadge"><i class="fa-regular fa-images"></i> 已选 ${images.length} / 共 ${images.length} 张</span>
+                    <span style="font-size: 11px; color: var(--text-dim);">点击图片预览原图，勾选可批量下载</span>
                 </div>
                 <div class="gallery-grid">
                     ${galleryItems}
@@ -652,8 +660,11 @@ function renderResult(data) {
 
         actionsHtml = `
             <div class="download-action-grid">
-                <button class="btn-primary grid-span-2" onclick="downloadAllImages()">
-                    <i class="fa-solid fa-download"></i> 批量下载全部高清原图 (${images.length}张)
+                <button class="btn-secondary" onclick="toggleGallerySelectAll()" id="gallerySelectAllBtn">
+                    <i class="fa-regular fa-square-check"></i> 取消全选
+                </button>
+                <button class="btn-primary" id="galleryBatchBtn" onclick="downloadAllImages()">
+                    <i class="fa-solid fa-download"></i> 下载选中 ${images.length} 张
                 </button>
                 ${music && music.url ? `
                 <button class="btn-secondary grid-span-2 btn-outline-cyan" onclick="triggerDownload('${music.url}', '${cleanTitle}_原声.mp3')">
@@ -1119,6 +1130,7 @@ function applyDesktopMode() {
     const bar = document.getElementById("desktopSaveBar");
     if (bar) bar.style.display = "flex";
     refreshPreviewCacheInfo();
+    syncConcurrencySelect();
     const destRow = document.getElementById("taskDestinationRow");
     if (destRow) destRow.style.display = "none";
     const navBtn = document.getElementById("openSaveDirBtn");
@@ -1450,6 +1462,13 @@ function renderTaskManagerUI() {
     const pEl = document.getElementById("statPaused"); if (pEl) pEl.textContent = paused;
     const sEl = document.getElementById("statSuccess"); if (sEl) sEl.textContent = success;
     const eEl = document.getElementById("statError"); if (eEl) eEl.textContent = error;
+
+    // 有失败任务时才出现「重试失败」，并带上数量
+    const retryAllBtn = document.getElementById("btnRetryFailed");
+    if (retryAllBtn) {
+        retryAllBtn.style.display = error > 0 ? "inline-flex" : "none";
+        retryAllBtn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> 重试失败 (${error})`;
+    }
 
     // 总进度条
     const overallBar = document.getElementById("overallProgressBar");
@@ -2078,6 +2097,51 @@ async function clearPreviewCache() {
     }
 }
 
+// 一键重试全部失败任务（失败原因已显示在卡片上，重试会从断点续传）
+async function retryAllFailedTasks() {
+    const failed = window.taskQueue.filter(t => t.status === 'error');
+    if (!failed.length) {
+        showToast("当前没有失败的任务", "info");
+        return;
+    }
+    window.isTaskQueuePaused = false;
+    await Promise.all(failed.map(t => retryTask(t.id)));
+    showToast(`已重新提交 ${failed.length} 个失败任务`, "success");
+}
+
+// 同时下载数：改后端立即生效（含排队中的任务），并持久化到用户配置
+async function applyConcurrency(value) {
+    const n = parseInt(value, 10);
+    const sel = document.getElementById("concurrencySelect");
+    if (!n) return;
+    if (sel) sel.disabled = true;
+    try {
+        const resp = await fetch("/api/server/concurrency", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ max_concurrent: n }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data.success === false) throw new Error(data.detail || "设置失败");
+        window.maxConcurrentTasks = data.max_concurrent;
+        if (window.serverConfig) window.serverConfig.max_concurrent = data.max_concurrent;
+        if (sel) sel.value = String(data.max_concurrent);
+        showToast(`同时下载数已设为 ${data.max_concurrent}`, "success");
+    } catch (e) {
+        showToast(e.message || "设置同时下载数失败", "error");
+        syncConcurrencySelect();
+    } finally {
+        if (sel) sel.disabled = false;
+    }
+}
+
+function syncConcurrencySelect() {
+    const sel = document.getElementById("concurrencySelect");
+    const n = (window.serverConfig && window.serverConfig.max_concurrent) || 3;
+    if (sel) sel.value = String(n);
+    window.maxConcurrentTasks = n;
+}
+
 function clearCompletedTasks() {
     fetch("/api/server/tasks/clear", { method: "POST" }).catch(() => {});
     // 与后端 clear_completed 的范围保持一致（success / canceled / error）。
@@ -2237,7 +2301,8 @@ async function refreshCurrentEpisodes() {
 }
 
 // 内存混流下载 (统一接入任务管理器与真实流式进度)
-function triggerMuxDownload(videoUrl, audioUrl, filename) {
+// options.subdir: 目标子目录（博主主页批量下载按博主名归档）
+function triggerMuxDownload(videoUrl, audioUrl, filename, options = {}) {
     if (!videoUrl) {
         showToast("视频链接无效", "error");
         return;
@@ -2253,6 +2318,7 @@ function triggerMuxDownload(videoUrl, audioUrl, filename) {
         audioUrl: audioUrl,
         videoBackups: backupsForUrl(videoUrl),
         audioBackups: backupsForUrl(audioUrl),
+        subdir: options.subdir || null,
         status: 'waiting',
         progress: 0,
         errorMsg: null,
@@ -2607,12 +2673,22 @@ function renderCreatorPosts(posts, isAppend = false) {
     }
 }
 
+// 博主主页批量下载：按博主名归档。
+// 十几个/几十个作品平铺在根目录太乱，与"图集/合集各归其位"是同一条思路。
+function creatorSubdir() {
+    const user = window.currentCreatorData && window.currentCreatorData.user;
+    const name = (user && (user.nickname || user.unique_id)) || "";
+    const safe = String(name).replace(/[\r\n\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim();
+    return safe ? safe.slice(0, 40) : null;
+}
+
 // 针对单个博主作品下载 (自动联动当前选定的期望画质)
 async function downloadPostItem(post, targetQuality = (window.currentBatchQuality || "highest")) {
     if (!post) return;
     const isImages = post.type === "images";
     const ext = isImages ? "jpg" : "mp4";
     const safeTitle = (post.title || post.id).replace(/[\r\n\\/:*?"<>|]/g, "_").slice(0, 40);
+    const subdir = creatorSubdir();
 
     // 如果是 B 站视频 / Twitter 视频，调用 /api/parse 提取匹配画质并触发混流下载
     const isBili = post.id && (post.id.startsWith("BV") || post.id.startsWith("bv") || (post.download_url && post.download_url.includes("bilibili.com")));
@@ -2652,9 +2728,9 @@ async function downloadPostItem(post, targetQuality = (window.currentBatchQualit
                 const aUrl = chosenQ ? chosenQ.audio_url : data.video.audio_url;
 
                 if (isBili && aUrl) {
-                    triggerMuxDownload(vUrl, aUrl, `${safeTitle}.mp4`);
+                    triggerMuxDownload(vUrl, aUrl, `${safeTitle}.mp4`, { subdir: subdir });
                 } else {
-                    triggerDownload(vUrl, `${safeTitle}.mp4`);
+                    triggerDownload(vUrl, `${safeTitle}.mp4`, { subdir: subdir });
                 }
                 return;
             }
@@ -2664,7 +2740,7 @@ async function downloadPostItem(post, targetQuality = (window.currentBatchQualit
     }
 
     // 默认直接代理下载
-    triggerDownload(post.download_url, `${safeTitle}.${ext}`);
+    triggerDownload(post.download_url, `${safeTitle}.${ext}`, { subdir: subdir });
 }
 
 // 切换单项选择状态
@@ -2801,6 +2877,48 @@ function galleryTargetTitle() {
     return (g && g.title) || "图集";
 }
 
+function gallerySelectedIndexes() {
+    return Array.from(document.querySelectorAll("[data-gallery-check]"))
+        .filter(el => el.checked)
+        .map(el => parseInt(el.dataset.galleryCheck, 10))
+        .filter(n => Number.isInteger(n))
+        .sort((a, b) => a - b);
+}
+
+// 勾选变化：只更新按钮文案与计数，不重建图集（否则会丢掉滚动位置与灯箱状态）
+function onGallerySelectChange() {
+    const boxes = Array.from(document.querySelectorAll("[data-gallery-check]"));
+    if (!boxes.length) return;
+    const selected = gallerySelectedIndexes();
+    if (window.pendingGallery) window.pendingGallery.selected = new Set(selected);
+
+    const allChecked = selected.length === boxes.length;
+    const toggle = document.getElementById("gallerySelectAllBtn");
+    if (toggle) {
+        toggle.innerHTML = allChecked
+            ? `<i class="fa-regular fa-square-check"></i> 取消全选`
+            : `<i class="fa-regular fa-square"></i> 全选`;
+    }
+    const btn = document.getElementById("galleryBatchBtn");
+    if (btn) {
+        btn.innerHTML = selected.length
+            ? `<i class="fa-solid fa-download"></i> 下载选中 ${selected.length} 张`
+            : `<i class="fa-solid fa-download"></i> 请先勾选图片`;
+    }
+    const badge = document.getElementById("galleryCountBadge");
+    if (badge) {
+        badge.innerHTML = `<i class="fa-regular fa-images"></i> 已选 ${selected.length} / 共 ${boxes.length} 张`;
+    }
+}
+
+function toggleGallerySelectAll() {
+    const boxes = Array.from(document.querySelectorAll("[data-gallery-check]"));
+    if (!boxes.length) return;
+    const allChecked = boxes.every(b => b.checked);
+    boxes.forEach(b => { b.checked = !allChecked; });
+    onGallerySelectChange();
+}
+
 function openGalleryImage(index) {
     const g = window.pendingGallery;
     if (!g || !g.images || !g.images[index]) return;
@@ -2816,11 +2934,16 @@ function downloadSingleImage(index) {
 function downloadAllImages() {
     const g = window.pendingGallery;
     if (!g || !g.images || !g.images.length) return;
+    const indexes = gallerySelectedIndexes();
+    if (!indexes.length) {
+        showToast("请先勾选要下载的图片（点图片左上角的方框）", "error");
+        return;
+    }
     const title = galleryTargetTitle();
-    showToast(`正在依次加入 ${g.images.length} 张原图（归档到「${title}」文件夹）...`, "info");
-    g.images.forEach((url, i) => {
+    showToast(`正在依次加入选中的 ${indexes.length} 张原图（归档到「${title}」文件夹）...`, "info");
+    indexes.forEach((idx, order) => {
         // 逐个错开入队：后端有并发上限，一次性全部提交也会排队，这里只是让顺序更直观
-        setTimeout(() => triggerDownload(url, `${g.title}_图${i + 1}.jpg`, { subdir: title }), i * 300);
+        setTimeout(() => triggerDownload(g.images[idx], `${g.title}_图${idx + 1}.jpg`, { subdir: title }), order * 300);
     });
 }
 

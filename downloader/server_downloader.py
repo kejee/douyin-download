@@ -9,12 +9,16 @@ from pydantic import BaseModel, Field
 import httpx
 from extractors.router import UnifiedMediaRouter
 from downloader.paths import (
+    MAX_MAX_CONCURRENT,
+    MIN_MAX_CONCURRENT,
     default_download_dir,
     ensure_dir,
     is_desktop_mode,
     load_local_dir,
+    load_max_concurrent,
     reveal_in_file_manager,
     save_local_dir,
+    save_max_concurrent,
 )
 from downloader.http_util import bilibili_cookie, download_headers
 from downloader.preview import preview_dir
@@ -82,10 +86,10 @@ class ServerDownloadManager:
     TRACK_RETRIES = 3
     RETRY_BACKOFF = (1.0, 2.5)
 
-    def __init__(self, download_dir: str = DOWNLOAD_DIR, max_concurrent: int = 3):
+    def __init__(self, download_dir: str = DOWNLOAD_DIR, max_concurrent: Optional[int] = None):
         self.server_dir = download_dir
         self.local_dir = load_local_dir() if is_desktop_mode() else download_dir
-        self.max_concurrent = max_concurrent
+        self.max_concurrent = max_concurrent or load_max_concurrent()
         # 惰性建目录：失败不影响进程启动（历史坑：import 期 makedirs 导致双击崩溃）
         ensure_dir(self.server_dir)
         ensure_dir(self.local_dir)
@@ -95,7 +99,30 @@ class ServerDownloadManager:
         self.listeners: List[asyncio.Queue] = []
         self._worker_task = None
         self._running = True
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        # 并发闸门：不用 asyncio.Semaphore —— 它的容量创建后无法修改，
+        # 而"同时下载数"要在界面上随时可调、且立即生效。这里用计数 + 条件变量，
+        # 改上限时唤醒等待者重新判断即可。
+        self._active_slots = 0
+        self._gate = asyncio.Condition()
+        # 正在被某个协程执行的 task.id（防止同一任务被并发下两次）
+        self._running_ids: set = set()
+        # 已派发协程（含还在排队等槽位的）的 task.id（防止同一任务被重复调度）
+        self._scheduled: set = set()
+
+    async def set_max_concurrent(self, value: int) -> int:
+        """调整同时下载数（1~8），持久化并立即生效"""
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return self.max_concurrent
+        value = max(MIN_MAX_CONCURRENT, min(MAX_MAX_CONCURRENT, value))
+        self.max_concurrent = value
+        save_max_concurrent(value)
+        logger.info(f"同时下载数已设为 {value}")
+        # 上限调大后要唤醒正在排队的任务（调小则无需操作，等待者会自行继续判断）
+        async with self._gate:
+            self._gate.notify_all()
+        return value
 
     def get_config(self) -> Dict[str, Any]:
         active_root = self.local_dir if is_desktop_mode() else self.server_dir
@@ -321,9 +348,33 @@ class ServerDownloadManager:
         return task
 
     async def _process_single_task(self, task: ServerTask):
-        async with self._semaphore:
-            if task.status == "paused" or task.status == "canceled":
+        # 同一任务同时只允许一个"调度中的协程"。
+        # 触发场景：任务在排队等槽位时被「全部暂停」，随后「开始全部」又派发新协程；
+        # 老协程会随槽位释放醒来。两个协程写同一个临时文件 = 内容交错（历史最严重事故形态）；
+        # 即便错开执行，也会白跑一遍流量并覆盖已完成的文件。
+        # 这里在**入口**就拦掉重复调度，判断与占位之间没有 await。
+        if task.id in self._scheduled:
+            logger.info(f"[{task.id}] 已有调度中的协程，忽略重复调度 | {task.filename}")
+            return
+        self._scheduled.add(task.id)
+
+        acquired = False
+        claimed = False
+        try:
+            acquired = await self._acquire_slot()
+            if not acquired:
                 return
+
+            # 已完成的任务不再执行：排队期间被"继续"过的任务，可能在拿到槽位时已经下完了
+            if task.status in ("paused", "canceled", "success"):
+                return
+
+            # 双保险：真正开始执行前再确认没有别的协程在跑同一个任务
+            if task.id in self._running_ids:
+                logger.info(f"[{task.id}] 已有协程在执行，跳过重复调度 | {task.filename}")
+                return
+            self._running_ids.add(task.id)
+            claimed = True
 
             task.status = "running"
             task.progress = 5
@@ -397,6 +448,29 @@ class ServerDownloadManager:
                 task.status = "error"
                 task.error = str(e)
                 self._notify_listeners("task_error", task.dict())
+        finally:
+            if claimed:
+                self._running_ids.discard(task.id)
+            self._scheduled.discard(task.id)
+            if acquired:
+                await self._release_slot()
+
+    async def _acquire_slot(self) -> bool:
+        """占用一个下载槽位（超过同时下载数则排队等待）。
+
+        返回 False 表示任务在排队期间被取消/暂停，无需再执行。
+        """
+        async with self._gate:
+            while self._active_slots >= self.max_concurrent:
+                await self._gate.wait()
+            self._active_slots += 1
+        return True
+
+    async def _release_slot(self) -> None:
+        async with self._gate:
+            if self._active_slots > 0:
+                self._active_slots -= 1
+            self._gate.notify_all()
 
     @staticmethod
     def _discard_partial(dest_path: str) -> None:

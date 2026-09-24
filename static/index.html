@@ -8,9 +8,9 @@
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
-    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.2.0">
-    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.2.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.5.2.0">
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.3.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.3.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.5.3.0">
 </head>
 
 <body>
@@ -214,7 +214,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.5.2.0</span>
+                    <span class="badge badge-version">v2.5.3.0</span>
                 </div>
             </div>
         </footer>
@@ -344,6 +344,9 @@
                 <button class="btn-tm-ctrl" onclick="cancelAllTasks()" title="取消全部进行中的任务（已下载的分片会丢弃）">
                     <i class="fa-solid fa-ban"></i> 取消全部
                 </button>
+                <button class="btn-tm-ctrl" id="btnRetryFailed" onclick="retryAllFailedTasks()" style="display: none;" title="重新提交全部失败任务">
+                    <i class="fa-solid fa-arrows-rotate"></i> 重试失败
+                </button>
                 <button class="btn-tm-ctrl" onclick="clearCompletedTasks()" title="清空已完成">
                     <i class="fa-solid fa-trash-can"></i> 清除完成
                 </button>
@@ -380,6 +383,18 @@
                     <i class="fa-solid fa-broom"></i> 预览缓存 <span id="previewCacheSize">—</span>
                 </button>
             </div>
+            <span class="dest-concurrency" title="同时下载的任务数（1~8）。太大容易触发平台限流，太小浪费带宽。">
+                <i class="fa-solid fa-gauge-high"></i> 同时下载
+                <select id="concurrencySelect" onchange="applyConcurrency(this.value)">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3" selected>3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="8">8</option>
+                </select>
+            </span>
         </div>
         <div class="task-manager-summary">
             <div class="task-stat-bar">
@@ -407,7 +422,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.5.2.0"></script>
+    <script src="/static/js/app.js?v=2.5.3.0"></script>
 </body>
 
 </html>

@@ -104,6 +104,32 @@ def save_local_dir(path: str) -> bool:
     return save_settings(data)
 
 
+# 同时下载数：界面可调（1~8），默认 3。
+# 太小浪费带宽，太大容易触发平台限流与磁盘抖动，也给批量任务留出处理余量。
+DEFAULT_MAX_CONCURRENT = 3
+MIN_MAX_CONCURRENT = 1
+MAX_MAX_CONCURRENT = 8
+
+
+def load_max_concurrent() -> int:
+    try:
+        value = int(load_settings().get("max_concurrent") or DEFAULT_MAX_CONCURRENT)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CONCURRENT
+    return max(MIN_MAX_CONCURRENT, min(MAX_MAX_CONCURRENT, value))
+
+
+def save_max_concurrent(value: int) -> bool:
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return False
+    value = max(MIN_MAX_CONCURRENT, min(MAX_MAX_CONCURRENT, value))
+    data = load_settings()
+    data["max_concurrent"] = value
+    return save_settings(data)
+
+
 def reveal_in_file_manager(path: str) -> bool:
     """在系统文件管理器中定位并高亮某个文件。
 

@@ -107,10 +107,28 @@ clearBtn.addEventListener("click", () => {
     urlInput.focus();
 });
 
+// ==========================================================================
+// 剪贴板读取
+// 桌面端的 WKWebView 会直接拒绝 navigator.clipboard.readText()，而且系统设置里
+// 没有可以授权的开关 —— 只能由 Python 侧读系统剪贴板。浏览器环境再回退到
+// 标准 Clipboard API。
+// ==========================================================================
+async function readClipboardText() {
+    if (hasNativeApi() && window.pywebview.api.read_clipboard) {
+        try {
+            const text = await window.pywebview.api.read_clipboard();
+            if (text) return text;
+        } catch (e) {
+            console.warn("原生剪贴板读取失败，回退浏览器 API:", e);
+        }
+    }
+    return await navigator.clipboard.readText();
+}
+
 // 粘贴按钮
 pasteBtn.addEventListener("click", async () => {
     try {
-        const text = await navigator.clipboard.readText();
+        const text = await readClipboardText();
         if (text) {
             urlInput.value = text;
             clearBtn.style.display = "inline-flex";
@@ -299,10 +317,27 @@ function backupsForUrl(url) {
     return (url && window.urlBackups[url]) || [];
 }
 
+// 队列里是否已有指向同一目标文件的活动任务
+// （两个任务写同一个 save_path 会并发写同一临时文件，导致内容交错甚至丢文件）
+function findActiveTaskByFilename(filename) {
+    if (!filename) return null;
+    return window.taskQueue.find(
+        t => t.filename === filename && ['waiting', 'running', 'paused'].includes(t.status)
+    ) || null;
+}
+
 // 触发下载 (统一接入任务管理器与真实流式进度)
 function triggerDownload(url, filename) {
     if (!url) return;
     const safeFilename = filename || "download_media.mp4";
+
+    const dup = findActiveTaskByFilename(safeFilename);
+    if (dup) {
+        showToast(`「${safeFilename}」已在下载队列中，未重复添加`, "info");
+        toggleTaskManager(true);
+        return;
+    }
+
     const taskId = `dl_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
     window.taskQueue.push({
@@ -820,6 +855,13 @@ function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
     const pageStr = String(pageNum).padStart(2, '0');
     const safeEpTitle = `${safeSeasonTitle}_P${pageStr}_${(epTitle || `第${pageNum}集`).replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30)}.mp4`;
 
+    const dup = findActiveTaskByFilename(safeEpTitle);
+    if (dup) {
+        showToast(`该分集已在下载队列中，未重复添加`, "info");
+        toggleTaskManager(true);
+        return;
+    }
+
     const taskId = `single_p${pageNum}_${Date.now()}`;
     window.taskQueue.push({
         id: taskId,
@@ -1040,9 +1082,15 @@ async function initServerArchiving() {
                 if (data && data.id) {
                     const localTask = window.taskQueue.find(t => t.id === data.id);
                     if (localTask) {
-                        localTask.status = data.status;
+                        // 前端刚发起暂停时，后端的 running 事件不应该把状态改回去，
+                        // 否则表现成"点了暂停但还在下"。等收到非 running 的状态再解除保持。
+                        const holdingPause = localTask.pendingPause && data.status === "running";
+                        if (!holdingPause) {
+                            localTask.status = data.status;
+                            localTask.errorMsg = data.error;
+                            if (data.status !== "running") localTask.pendingPause = false;
+                        }
                         localTask.progress = data.progress;
-                        localTask.errorMsg = data.error;
                         renderTaskManagerUI();
                     } else if (event === "task_added" || data.status === "running") {
                         window.taskQueue.push({
@@ -1229,8 +1277,18 @@ async function submitTaskToBackend(task) {
             body: JSON.stringify(payload),
         });
         const data = await resp.json();
-        if (!resp.ok || !data.success || !data.tasks || !data.tasks.length) {
+        if (!resp.ok || !data.success) {
             throw new Error(data.detail || "本地保存任务提交失败");
+        }
+        // 后端判定目标路径上已有活动任务：说明本条是重复入队，直接移除即可
+        if (data.skipped && data.skipped.length) {
+            window.taskQueue = window.taskQueue.filter(t => t.id !== task.id);
+            showToast(data.skipped[0].reason || "该文件已在下载队列中", "info");
+            renderTaskManagerUI();
+            return;
+        }
+        if (!data.tasks || !data.tasks.length) {
+            throw new Error("本地保存任务提交失败");
         }
         task.serverSide = true;
         task.status = "waiting";
@@ -1353,6 +1411,7 @@ function pauseTask(taskId) {
     if (task.serverSide) {
         fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/pause`, { method: "POST" }).catch(() => {});
         task.status = 'paused';
+        task.pendingPause = true;
         renderTaskManagerUI();
         return;
     }
@@ -1370,6 +1429,7 @@ function resumeTask(taskId) {
     if (task.serverSide) {
         fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" }).catch(() => {});
         task.status = 'waiting';
+        task.pendingPause = false;
         renderTaskManagerUI();
         return;
     }
@@ -1385,6 +1445,7 @@ function retryTask(taskId) {
         fetch(`/api/server/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" }).catch(() => {});
         task.status = 'waiting';
         task.progress = 0;
+        task.pendingPause = false;
         renderTaskManagerUI();
         return;
     }
@@ -1402,6 +1463,7 @@ function pauseAllTasks() {
             if (t.status === 'running' || t.status === 'waiting') {
                 fetch(`/api/server/tasks/${encodeURIComponent(t.id)}/pause`, { method: "POST" }).catch(() => {});
                 t.status = 'paused';
+                t.pendingPause = true;
             }
             return;
         }
@@ -1422,6 +1484,7 @@ function resumeAllTasks() {
         if (t.status !== 'paused') return;
         if (t.serverSide) {
             fetch(`/api/server/tasks/${encodeURIComponent(t.id)}/resume`, { method: "POST" }).catch(() => {});
+            t.pendingPause = false;
         }
         t.status = 'waiting';
     });
@@ -1432,7 +1495,11 @@ function resumeAllTasks() {
 
 function clearCompletedTasks() {
     fetch("/api/server/tasks/clear", { method: "POST" }).catch(() => {});
-    window.taskQueue = window.taskQueue.filter(t => t.status !== 'success');
+    // 与后端 clear_completed 的范围保持一致（success / canceled / error）。
+    // 否则前端会残留后端已不存在的任务，点「重试」会直接 404。
+    window.taskQueue = window.taskQueue.filter(
+        t => !['success', 'canceled', 'error'].includes(t.status)
+    );
     renderTaskManagerUI();
     showToast("已清空全部已完成任务", "info");
 }
@@ -1495,15 +1562,60 @@ async function downloadAllEpisodes(mode = 'direct') {
         };
     });
 
-    window.taskQueue.push(...newTasks);
-    window.isTaskQueuePaused = false;
-
-    // 打开任务管理器抽屉
+    // 跳过已在队列中或已下载到本地的集数，避免重复拉取
+    const { kept, skipped } = await filterDownloadableTasks(newTasks, safeSeasonTitle);
     toggleTaskManager(true);
-    showToast(`已成功将 ${newTasks.length} 集加入下载任务管理器！`, "success");
+    if (!kept.length) {
+        showToast(`这 ${newTasks.length} 集都已在队列中或本地已存在，无需重复下载`, "info");
+        return;
+    }
+
+    window.taskQueue.push(...kept);
+    window.isTaskQueuePaused = false;
+    if (skipped.length) {
+        showToast(`已跳过 ${skipped.length} 集（本地已存在或已在队列），加入 ${kept.length} 集`, "info");
+    } else {
+        showToast(`已成功将 ${kept.length} 集加入下载任务管理器！`, "success");
+    }
 
     // 开始调度
     scheduleTaskQueue();
+}
+
+// ==========================================================================
+// 批量下载前的过滤
+// 判重依据是「最终落盘的文件名」，与后端 save_path 的最后一段一致：
+//   1) 队列中已有同名的活动任务 -> 跳过
+//   2) 本地目录里已存在同名文件 -> 跳过
+// ==========================================================================
+async function filterDownloadableTasks(tasks, subdir) {
+    const queued = new Set(
+        window.taskQueue
+            .filter(t => ['waiting', 'running', 'paused'].includes(t.status))
+            .map(t => t.filename)
+    );
+
+    let onDisk = new Set();
+    if (window.isDesktop) {
+        try {
+            const resp = await fetch(`/api/local/files?subdir=${encodeURIComponent(subdir || "")}`);
+            if (resp.ok) {
+                const data = await resp.json();
+                onDisk = new Set(data.files || []);
+            }
+        } catch (e) {
+            console.warn("读取本地文件列表失败，本次不做本地去重:", e);
+        }
+    }
+
+    const kept = [];
+    const skipped = [];
+    tasks.forEach(t => {
+        if (queued.has(t.filename)) skipped.push({ task: t, why: "已在队列中" });
+        else if (onDisk.has(t.filename)) skipped.push({ task: t, why: "本地已存在" });
+        else kept.push(t);
+    });
+    return { kept, skipped };
 }
 
 // 重新检测/刷新当前视频的分P列表与合集
@@ -1661,7 +1773,7 @@ if (creatorClearBtn) {
 if (creatorPasteBtn) {
     creatorPasteBtn.addEventListener("click", async () => {
         try {
-            const text = await navigator.clipboard.readText();
+            const text = await readClipboardText();
             if (text) {
                 creatorUrlInput.value = text;
                 creatorClearBtn.style.display = "inline-flex";

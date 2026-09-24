@@ -25,6 +25,21 @@ class _SourceRejected(Exception):
     """媒体源在响应头阶段就被拒（4xx/5xx），可换源重试"""
 
 
+class DuplicateTaskError(Exception):
+    """目标路径上已存在活动任务（waiting / running / paused）
+
+    同一 save_path 上跑两个任务是危险的：两者会写同一个临时文件，后开者以
+    "wb" 截断前者已写内容，两个协程又各自维护 offset 写同一 inode，内容会交错；
+    先完成者 rename 走文件后，后完成者 rename 直接抛 FileNotFoundError。
+    实测更糟的情况是「任务报 success 但目标文件根本不存在」——
+    因此同一路径同时只允许一个活动任务。
+    """
+
+    def __init__(self, existing: "ServerTask"):
+        self.existing = existing
+        super().__init__(f"该文件已在下载队列中（{existing.status}）")
+
+
 def _fmt_size(num_bytes: int) -> str:
     """人类可读的体积字符串（日志用）"""
     size = float(num_bytes or 0)
@@ -95,6 +110,26 @@ class ServerDownloadManager:
         save_local_dir(path)
         logger.info(f"本地保存目录已切换为: {path}")
         return True
+
+    def list_local_files(self, subdir: str = "") -> Dict[str, Any]:
+        """列出桌面端保存目录下的文件名
+
+        供前端在批量下载前跳过「本地已存在」的集数。只读操作，不改动任何文件。
+        """
+        target = self.local_dir
+        if subdir:
+            target = os.path.join(self.local_dir, self.sanitize_filename(subdir))
+        if not os.path.isdir(target):
+            return {"dir": target, "exists": False, "files": []}
+        try:
+            files = sorted(
+                n for n in os.listdir(target)
+                if os.path.isfile(os.path.join(target, n))
+                and not n.endswith((".part", ".m4s"))
+            )
+        except OSError:
+            files = []
+        return {"dir": target, "exists": True, "files": files}
 
     def _root_for_channel(self, channel: str) -> str:
         return self.local_dir if channel == "local" else self.server_dir
@@ -167,6 +202,15 @@ class ServerDownloadManager:
         ensure_dir(target_folder)
         filename = resolved
         save_path = os.path.join(target_folder, filename)
+
+        # 同一目标路径只允许一个活动任务。已完成 / 失败 / 取消的任务不阻塞，
+        # 否则用户想重下已失败的文件就永远排不进去。
+        for existing in self.tasks.values():
+            if existing.save_path == save_path and existing.status in ("waiting", "running", "paused"):
+                logger.info(
+                    f"任务跳过 | {filename} 已在队列中（{existing.id} / {existing.status}）"
+                )
+                raise DuplicateTaskError(existing)
 
         # 允许调用方（桌面端前端）指定任务 id，使 SSE 事件能与本地任务一一对应，
         # 避免事件早于 HTTP 响应到达而产生重复条目
@@ -274,13 +318,26 @@ class ServerDownloadManager:
                 task.error = str(e)
                 self._notify_listeners("task_error", task.dict())
 
+    def _temp_path(self, task: ServerTask, suffix: str) -> str:
+        """临时文件路径（带任务 id）
+
+        早先用固定的 `<save_path>.downloading` 作临时名：两个指向同一目标的任务
+        会写同一个文件，互相截断与交错。带上 task.id 后各写各的，互不干扰。
+        """
+        return f"{task.save_path}.{task.id}.{suffix}"
+
     def _cleanup_temp_files(self, task: ServerTask):
-        """清理中断/失败残留的分片临时文件"""
-        for temp_f in (
+        """清理中断/失败残留的分片临时文件（含旧命名，便于升级后回收）"""
+        candidates = [
+            self._temp_path(task, "part"),
+            self._temp_path(task, "v.m4s"),
+            self._temp_path(task, "a.m4s"),
+            # 旧版本使用的固定命名，升级后可能残留
             f"{task.save_path}.downloading",
             f"{task.save_path}.temp_v.m4s",
             f"{task.save_path}.temp_a.m4s",
-        ):
+        ]
+        for temp_f in candidates:
             try:
                 if os.path.exists(temp_f):
                     os.remove(temp_f)
@@ -294,7 +351,7 @@ class ServerDownloadManager:
         backups: Optional[List[str]] = None,
     ):
         """直链流式落盘（失败自动换源）"""
-        temp_path = f"{task.save_path}.downloading"
+        temp_path = self._temp_path(task, "part")
         await self._download_track(
             task, video_url, temp_path, label="媒体流",
             base_progress=0, span=95, backups=backups,
@@ -395,8 +452,8 @@ class ServerDownloadManager:
         audio_backups: Optional[List[str]] = None,
     ):
         """下载音视频双轨并调用 FFmpeg 无损封装"""
-        temp_v = f"{task.save_path}.temp_v.m4s"
-        temp_a = f"{task.save_path}.temp_a.m4s"
+        temp_v = self._temp_path(task, "v.m4s")
+        temp_a = self._temp_path(task, "a.m4s")
 
         # 1. 下载视频轨
         task.progress = 10
@@ -447,8 +504,15 @@ class ServerDownloadManager:
             raise RuntimeError(f"FFmpeg 封装失败: {stderr.decode('utf-8', errors='ignore')}")
 
     def pause_task(self, task_id: str) -> bool:
+        """暂停任务。只对进行中的任务生效。
+
+        此前不带状态判断：已完成（success）的任务被暂停后会变成 paused，
+        此时再点「继续」会把整个文件重新下载一遍（实测复现）。取消态同理。
+        """
         if task_id in self.tasks:
             task = self.tasks[task_id]
+            if task.status not in ("waiting", "running"):
+                return False
             task.status = "paused"
             self._notify_listeners("task_paused", task.dict())
             return True

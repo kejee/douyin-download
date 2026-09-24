@@ -220,6 +220,23 @@ class DesktopAPI:
     def get_app_version(self) -> str:
         return APP_VERSION
 
+    def read_clipboard(self) -> str:
+        """读取系统剪贴板中的文本（供界面上的「粘贴」按钮调用）
+
+        WKWebView 里 `navigator.clipboard.readText()` 会被 WebKit 直接拒绝，
+        且系统设置中没有可授权的开关 —— 只能由原生侧代读。
+        """
+        try:
+            from AppKit import NSPasteboard, NSPasteboardTypeString
+        except ImportError:
+            return ""
+        try:
+            pasteboard = NSPasteboard.generalPasteboard()
+            return pasteboard.stringForType_(NSPasteboardTypeString) or ""
+        except Exception as exc:
+            log.warning(f"读取剪贴板失败: {exc}")
+            return ""
+
     def get_download_dir(self) -> str:
         return default_download_dir()
 

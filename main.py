@@ -15,7 +15,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.4.0.0"
+APP_VERSION = "2.4.1.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -240,6 +240,7 @@ async def stream_mux_download(
 # 服务端 / NAS 自动归档与任务管理接口
 # ==========================================================================
 from downloader import server_downloader
+from downloader.server_downloader import DuplicateTaskError
 
 class ServerDownloadItem(BaseModel):
     url: Optional[str] = None
@@ -268,25 +269,41 @@ async def get_server_config():
 async def create_server_downloads(req: ServerBatchDownloadRequest):
     """提交一个或多个下载任务到服务端/NAS 自动归档"""
     created_tasks = []
+    skipped: List[dict] = []
     for item in req.tasks:
-        task = server_downloader.add_task(
-            url=item.url,
-            direct_url=item.direct_url,
-            audio_url=item.audio_url,
-            title=item.title,
-            season_title=item.season_title,
-            platform=item.platform,
-            page_num=item.page_num,
-            sessdata=item.sessdata,
-            channel="server",
-            filename=item.filename,
-            subdir=item.subdir,
-            task_id=item.task_id,
-            direct_backup_urls=item.direct_backup_urls,
-            audio_backup_urls=item.audio_backup_urls,
-        )
-        created_tasks.append(task)
-    return {"success": True, "count": len(created_tasks), "tasks": created_tasks}
+        try:
+            task = server_downloader.add_task(
+                url=item.url,
+                direct_url=item.direct_url,
+                audio_url=item.audio_url,
+                title=item.title,
+                season_title=item.season_title,
+                platform=item.platform,
+                page_num=item.page_num,
+                sessdata=item.sessdata,
+                channel="server",
+                filename=item.filename,
+                subdir=item.subdir,
+                task_id=item.task_id,
+                direct_backup_urls=item.direct_backup_urls,
+                audio_backup_urls=item.audio_backup_urls,
+            )
+            created_tasks.append(task)
+        except DuplicateTaskError as exc:
+            # 同一目标路径已有活动任务：跳过而不是让它俩并发写同一个文件
+            skipped.append({
+                "title": item.title,
+                "filename": item.filename,
+                "reason": str(exc),
+                "existing_id": exc.existing.id,
+            })
+    return {
+        "success": True,
+        "count": len(created_tasks),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+        "tasks": created_tasks,
+    }
 
 @app.get("/api/server/tasks")
 async def list_server_tasks():
@@ -337,29 +354,54 @@ async def set_local_config(req: LocalDirRequest):
         raise HTTPException(status_code=400, detail="目录不存在或不可写")
     return {"success": True, "download_dir": server_downloader.local_dir}
 
+@app.get("/api/local/files")
+async def list_local_files(subdir: str = ""):
+    """列出桌面端保存目录下的文件名
+
+    供前端批量下载前跳过「本地已存在」的集数，避免重复拉取。只读。
+    """
+    return server_downloader.list_local_files(subdir)
+
 @app.post("/api/local/download")
 async def create_local_downloads(req: ServerBatchDownloadRequest):
     """提交下载任务到桌面端本地目录归档"""
     created_tasks = []
+    skipped: List[dict] = []
     for item in req.tasks:
-        task = server_downloader.add_task(
-            url=item.url,
-            direct_url=item.direct_url,
-            audio_url=item.audio_url,
-            title=item.title,
-            season_title=item.season_title,
-            platform=item.platform,
-            page_num=item.page_num,
-            sessdata=item.sessdata,
-            channel="local",
-            filename=item.filename,
-            subdir=item.subdir,
-            task_id=item.task_id,
-            direct_backup_urls=item.direct_backup_urls,
-            audio_backup_urls=item.audio_backup_urls,
-        )
-        created_tasks.append(task)
-    return {"success": True, "count": len(created_tasks), "tasks": created_tasks}
+        try:
+            task = server_downloader.add_task(
+                url=item.url,
+                direct_url=item.direct_url,
+                audio_url=item.audio_url,
+                title=item.title,
+                season_title=item.season_title,
+                platform=item.platform,
+                page_num=item.page_num,
+                sessdata=item.sessdata,
+                channel="local",
+                filename=item.filename,
+                subdir=item.subdir,
+                task_id=item.task_id,
+                direct_backup_urls=item.direct_backup_urls,
+                audio_backup_urls=item.audio_backup_urls,
+            )
+            created_tasks.append(task)
+        except DuplicateTaskError as exc:
+            # 同一目标路径上已有活动任务（waiting/running/paused）：跳过。
+            # 否则两个任务会写同一个临时文件，导致内容交错甚至文件丢失。
+            skipped.append({
+                "title": item.title,
+                "filename": item.filename,
+                "reason": str(exc),
+                "existing_id": exc.existing.id,
+            })
+    return {
+        "success": True,
+        "count": len(created_tasks),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+        "tasks": created_tasks,
+    }
 
 @app.get("/api/tasks/events")
 async def task_events():

@@ -8,9 +8,9 @@
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
-    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.4.2.0">
-    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.4.2.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.4.2.0">
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.4.3.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.4.3.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.4.3.0">
 </head>
 
 <body>
@@ -214,7 +214,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.4.2.0</span>
+                    <span class="badge badge-version">v2.4.3.0</span>
                 </div>
             </div>
         </footer>
@@ -299,6 +299,33 @@
         </div>
     </div>
 
+    <!-- 同名文件确认（桌面端：目标文件已存在时询问覆盖还是保留两者） -->
+    <div class="modal-overlay" id="dupFileModal">
+        <div class="modal-card" style="max-width: 460px;">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fa-solid fa-file-circle-exclamation text-gradient"></i> 本地已有同名文件
+                </div>
+                <button class="modal-close" id="closeDupModalBtn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <p class="dup-file-desc" id="dupFileDesc"></p>
+                <div class="dup-file-actions">
+                    <button class="btn-primary" id="dupOverwriteBtn">
+                        <i class="fa-solid fa-rotate"></i> 重新下载（覆盖原文件）
+                    </button>
+                    <button class="btn-secondary-sm" id="dupKeepBothBtn">
+                        <i class="fa-solid fa-copy"></i> 保留两个
+                    </button>
+                </div>
+                <p class="dup-file-hint" id="dupKeepHint"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary-sm" id="dupCancelBtn">取消本次下载</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 批量下载任务管理器 (悬浮弹窗/抽屉) -->
     <div class="task-manager-drawer" id="taskManagerDrawer" style="display: none;">
         <div class="task-manager-header">
@@ -374,7 +401,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.4.2.0"></script>
+    <script src="/static/js/app.js?v=2.4.3.0"></script>
 </body>
 
 </html>

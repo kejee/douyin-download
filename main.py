@@ -15,7 +15,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.4.2.0"
+APP_VERSION = "2.4.3.0"
 
 app = FastAPI(
     title="全网多平台短视频/图集解析与下载服务",
@@ -353,6 +353,18 @@ async def set_local_config(req: LocalDirRequest):
     if not server_downloader.set_local_dir(req.download_dir):
         raise HTTPException(status_code=400, detail="目录不存在或不可写")
     return {"success": True, "download_dir": server_downloader.local_dir}
+
+class LocalCheckRequest(BaseModel):
+    filename: str
+    subdir: Optional[str] = None
+
+@app.post("/api/local/check")
+async def check_local_file(req: LocalCheckRequest):
+    """下载前检查目标文件是否已存在
+
+    桌面端用它决定是否弹出「覆盖重下 / 保留两者」的选择。只读。
+    """
+    return server_downloader.check_local_file(req.filename, req.subdir or "")
 
 @app.get("/api/local/files")
 async def list_local_files(subdir: str = ""):

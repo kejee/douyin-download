@@ -117,6 +117,50 @@ class ServerDownloadManager:
         logger.info(f"本地保存目录已切换为: {path}")
         return True
 
+    def _resolve_target(self, filename: str, subdir: str = "") -> str:
+        """算出目标文件的绝对路径（与 add_task 的落盘规则保持一致）"""
+        root = self.local_dir
+        if subdir:
+            root = os.path.join(root, self.sanitize_filename(subdir))
+        return os.path.join(root, self.sanitize_filename(filename))
+
+    def unique_filename(self, filename: str, subdir: str = "") -> str:
+        """在目标目录里找一个不冲突的名字：xxx.mp4 -> xxx (1).mp4 -> xxx (2).mp4
+
+        与 Finder 的「保留两者」命名习惯一致。
+        """
+        safe = self.sanitize_filename(filename)
+        stem, dot, ext = safe.rpartition('.')
+        if not dot or not (0 < len(ext) <= 5):
+            stem, ext = safe, ''
+        for index in range(1, 1000):
+            candidate = f"{stem} ({index})" + (f".{ext}" if ext else "")
+            if not os.path.exists(self._resolve_target(candidate, subdir)):
+                return candidate
+        return safe
+
+    def check_local_file(self, filename: str, subdir: str = "") -> Dict[str, Any]:
+        """下载前检查目标文件是否已存在
+
+        供前端弹窗让用户选择「覆盖重下」还是「保留两者」。只读操作。
+        """
+        safe = self.sanitize_filename(filename)
+        info: Dict[str, Any] = {"exists": False, "filename": safe, "suggested": safe}
+        target = self._resolve_target(safe, subdir)
+        if not os.path.isfile(target):
+            return info
+        try:
+            stat = os.stat(target)
+        except OSError:
+            return info
+        info.update({
+            "exists": True,
+            "size_text": _fmt_size(stat.st_size),
+            "mtime_text": time.strftime("%m-%d %H:%M", time.localtime(stat.st_mtime)),
+            "suggested": self.unique_filename(safe, subdir),
+        })
+        return info
+
     def list_local_files(self, subdir: str = "") -> Dict[str, Any]:
         """列出桌面端保存目录下的文件名
 

@@ -3008,6 +3008,34 @@ body {
 
 /* ===== 桌面客户端扩展 ===== */
 
+/* 同名文件确认弹窗 */
+.dup-file-desc {
+    margin: 0 0 16px;
+    font-size: 13px;
+    line-height: 1.75;
+    color: var(--text-main);
+    word-break: break-all;
+}
+
+.dup-file-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.dup-file-actions button {
+    width: 100%;
+    justify-content: center;
+}
+
+.dup-file-hint {
+    margin: 14px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    word-break: break-all;
+}
+
 /* 本地保存位置栏（桌面端替代"存到当前设备 / NAS 归档"开关） */
 .desktop-save-bar {
     gap: 10px;

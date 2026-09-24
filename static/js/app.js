@@ -1046,6 +1046,75 @@ function initSponsorAd() {
     document.body.appendChild(script);
 }
 
+// ==========================================================================
+// 同名文件确认
+// 目标文件已存在时，让用户决定「覆盖重下」还是「保留两者」（自动改名）。
+// 判定依据是最终落盘的文件名，路径规则与后端 add_task 保持一致。
+// ==========================================================================
+function askDuplicateFile(info) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("dupFileModal");
+        const desc = document.getElementById("dupFileDesc");
+        const hint = document.getElementById("dupKeepHint");
+        if (!modal || !desc) { resolve("overwrite"); return; }
+
+        const meta = [info.size_text || "未知大小", info.mtime_text || ""]
+            .filter(Boolean).join("，");
+        desc.textContent = `「${info.filename}」已存在于保存目录（${meta}）。`;
+        hint.textContent = info.suggested
+            ? `选择「保留两者」将另存为：${info.suggested}`
+            : "";
+
+        const btnOverwrite = document.getElementById("dupOverwriteBtn");
+        const btnKeep = document.getElementById("dupKeepBothBtn");
+        const btnCancel = document.getElementById("dupCancelBtn");
+        const btnClose = document.getElementById("closeDupModalBtn");
+
+        const cleanup = () => {
+            modal.classList.remove("active");
+            [btnOverwrite, btnKeep, btnCancel, btnClose].forEach(b => { if (b) b.onclick = null; });
+            modal.onclick = null;
+        };
+        const pick = (choice) => { cleanup(); resolve(choice); };
+
+        btnOverwrite.onclick = () => pick("overwrite");
+        btnKeep.onclick = () => pick("keep");
+        btnCancel.onclick = () => pick("cancel");
+        btnClose.onclick = () => pick("cancel");
+        // 点击遮罩等同取消（默认行为，避免误触覆盖）
+        modal.onclick = (e) => { if (e.target === modal) pick("cancel"); };
+
+        modal.classList.add("active");
+    });
+}
+
+// 返回 "proceed"（直接下）/ {filename}（改名后下）/ "cancel"
+async function resolveFilenameConflict(task) {
+    if (!window.isDesktop || !task.filename) return "proceed";
+    try {
+        const resp = await fetch("/api/local/check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                filename: task.filename,
+                subdir: task.seasonTitle || null,
+            }),
+        });
+        if (!resp.ok) return "proceed";
+        const info = await resp.json();
+        if (!info.exists) return "proceed";
+
+        const choice = await askDuplicateFile(info);
+        if (choice === "overwrite") return "proceed";
+        if (choice === "keep") return { filename: info.suggested };
+        return "cancel";
+    } catch (e) {
+        // 检查失败不该阻塞下载，按覆盖继续
+        console.warn("检查本地同名文件失败，按覆盖继续:", e);
+        return "proceed";
+    }
+}
+
 // 初始化服务端/NAS配置与SSE
 async function initServerArchiving() {
     try {
@@ -1255,6 +1324,19 @@ window.processTaskQueue = scheduleTaskQueue;
 async function submitTaskToBackend(task) {
     task.submitted = true;
     try {
+        // 目标文件已存在时先问用户：覆盖重下，还是保留两者
+        const decision = await resolveFilenameConflict(task);
+        if (decision === "cancel") {
+            window.taskQueue = window.taskQueue.filter(t => t.id !== task.id);
+            renderTaskManagerUI();
+            showToast("已取消本次下载", "info");
+            return;
+        }
+        if (decision && decision.filename) {
+            task.filename = decision.filename;
+            task.title = decision.filename;
+        }
+
         const payload = {
             tasks: [{
                 task_id: task.id,

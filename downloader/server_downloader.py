@@ -799,6 +799,28 @@ class ServerDownloadManager:
             delete_history(to_del)
         return len(to_del)
 
+    def clear_settled_tasks(self) -> int:
+        """清空「已完成与历史」区在内存里的那一份：success / canceled。
+
+        与 clear_completed 的两点区别（别合并回一个方法）：
+        1. **不含 error**。失败任务要留在活跃区让用户重试或看失败原因，
+           不该被"清空历史"顺手带走；clear_completed 是维护入口，会把失败一起清掉。
+        2. **不碰 delete_history**。调用方（/api/history/clear）随后会整表清空历史，
+           这里再按 id 删一遍是白跑一趟。
+
+        必须连内存任务一起清：历史区的数据来源是「内存终态任务 + 持久化历史」两条，
+        只清持久化历史的话，前端清完 taskQueue，下次 /api/server/tasks 同步又把旧任务
+        灌回来，界面上历史区会"复活"，看起来像按钮没生效。
+        """
+        to_del = [tid for tid, t in self.tasks.items() if t.status in ("success", "canceled")]
+        for tid in to_del:
+            task = self.tasks[tid]
+            # 成功的临时分片已 rename 掉；取消的可能还留着，一并回收
+            if task.status == "canceled":
+                self._cleanup_temp_files(task)
+            del self.tasks[tid]
+        return len(to_del)
+
     def _record_history(self, task: "ServerTask", size_bytes: int = 0) -> None:
         """把终态任务写进下载历史。失败不抛异常（历史丢一条远好过任务被判失败）"""
         try:

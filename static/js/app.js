@@ -2181,7 +2181,14 @@ function removeTask(taskId) {
     window.taskQueue = window.taskQueue.filter(t => t.id !== taskId);
     // 终态任务在历史里也有一条同名记录（后端落盘的）。列表里移除了却还在历史里
     // 冒出来，看起来像"移除按钮没生效"，所以同步遗忘。
-    if (_tmTerminal(task)) deleteHistoryRecords([taskId]);
+    //
+    // 这里不能用 _tmTerminal：它只含 success/canceled（失败任务要留在活跃区等用户重试），
+    // 但后端在 success / error / canceled **三种终态都会落历史**，失败任务同样有记录。
+    // 按 _tmTerminal 判断的话，移除一条失败任务不会删它的历史，重启客户端后这条
+    // 已经"被移除"的失败任务又会从历史区冒出来。
+    if (['success', 'canceled', 'error'].includes(task.status)) {
+        deleteHistoryRecords([taskId]);
+    }
     renderTaskManagerUI();
 }
 
@@ -2229,24 +2236,41 @@ async function deleteHistoryRecords(ids) {
     }
 }
 
+// 清空「已完成与历史」区。
+//
+// 这里原本只清 window.taskHistory，结果本次会话刚完成、还在 taskQueue 里的任务
+// 清不掉（_tmHistoryItems 的 fromQueue 仍会返回它们），界面显示「已完成与历史 · 1」，
+// 看起来像按钮没生效，只有重启客户端才真的干净。历史区有两条数据来源，必须一起清。
+//
+// 失败(error)任务刻意不动：它留在活跃区等用户重试或看失败原因，
+// 不该被"清空历史"顺手带走。
+//
+// 顺序上**先请求后端、成功后再改本地状态**。反过来（乐观更新 + 失败回滚）看着更快，
+// 但回滚不完整：本地已经把这批终态任务从 taskQueue 里删掉了，而 syncTaskStatusFromServer
+// 只能同步"已存在的任务"，救不回被删的条目，界面就停在"已清空"的假象上。
+// 请求走的是本机回环，这点延迟看不出来。
 async function clearDownloadHistory() {
-    if (!window.taskHistory.length) {
+    const count = _tmHistoryItems().length;
+    if (!count) {
         showToast("暂无历史记录", "info");
         return;
     }
-    const count = window.taskHistory.length;
-    window.taskHistory = [];
-    window._tmStructureSignature = null;
-    renderTaskManagerUI();
     try {
         const resp = await fetch("/api/history/clear", { method: "POST" });
         if (!resp.ok) throw new Error("清空失败");
-        showToast(`已清空 ${count} 条历史记录（文件未被删除）`, "info");
     } catch (e) {
         console.warn("清空历史失败:", e);
         showToast("清空历史失败，请稍后再试", "error");
-        loadDownloadHistory();   // 失败就把真实状态拉回来，别让界面说谎
+        return;                       // 本地状态一个字节都没动，无需回滚
     }
+    const settledIds = window.taskQueue
+        .filter(t => t.status === 'success' || t.status === 'canceled')
+        .map(t => t.id);
+    window.taskQueue = window.taskQueue.filter(t => !settledIds.includes(t.id));
+    window.taskHistory = [];
+    window._tmStructureSignature = null;
+    renderTaskManagerUI();
+    showToast(`已清空 ${count} 条历史记录（文件未被删除）`, "info");
 }
 
 // 取消全部：把所有活动任务（等待/下载中/已暂停）一次性取消
@@ -2455,27 +2479,9 @@ function syncConcurrencySelect() {
     window.maxConcurrentTasks = n;
 }
 
-function clearCompletedTasks() {
-    const terminalIds = window.taskQueue
-        .filter(t => ['success', 'canceled', 'error'].includes(t.status))
-        .map(t => t.id);
-    // 后端 clear_completed 会顺带删掉这些任务的历史记录，前端本地历史也要同步移除，
-    // 否则界面会停在"清空前的历史"，用户以为按钮没生效。
-    window.taskHistory = window.taskHistory.filter(h => !terminalIds.includes(h.id));
-    // 与后端 clear_completed 的范围保持一致（success / canceled / error）。
-    // 否则前端会残留后端已不存在的任务，点「重试」会直接 404。
-    window.taskQueue = window.taskQueue.filter(
-        t => !['success', 'canceled', 'error'].includes(t.status)
-    );
-    renderTaskManagerUI();
-    if (!terminalIds.length) {
-        showToast("当前没有已完成/失败/已取消的任务", "info");
-        return;
-    }
-    fetch("/api/server/tasks/clear", { method: "POST" })
-        .catch(() => showToast("清空服务端任务失败，请稍后再试", "error"));
-    showToast(`已清空 ${terminalIds.length} 条完成记录（含历史）`, "info");
-}
+// 「清除完成」按钮已并入「清空历史」（见 clearDownloadHistory）。
+// 分区之后终态任务已并入历史区，独立的「已完成列表」不复存在，
+// 这个按钮的作用域与「清空历史」重叠，且重叠处会出现"点了清不干净"的错觉。
 
 // 批量下载当前选集所有分集入口
 async function downloadAllEpisodes(mode = 'direct') {

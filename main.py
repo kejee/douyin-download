@@ -16,7 +16,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.4.0"
+APP_VERSION = "2.5.5.0"
 
 logger = logging.getLogger(__name__)
 
@@ -354,15 +354,21 @@ async def get_download_history():
 
 @app.post("/api/history/clear")
 async def clear_download_history():
-    """清空下载历史（只删记录，不动已下载的文件）"""
+    """清空下载历史（只删记录，不动已下载的文件）
+
+    历史区的数据来源是两条：内存里的 success/canceled 任务 + 持久化的 history.json。
+    只清后者的话，前端清完 taskQueue，下次 /api/server/tasks 同步又把旧任务灌回来，
+    界面上会残留「本次会话刚完成任务」，看起来像按钮没生效。所以这里两条一起清。
+    """
+    tasks_cleared = server_downloader.clear_settled_tasks()
     count = clear_history()
-    return {"success": True, "cleared": count}
+    return {"success": True, "cleared": count, "tasks_cleared": tasks_cleared}
 
 @app.post("/api/history/delete")
 async def delete_download_history(req: HistoryDeleteRequest):
     """按 id 删除历史记录。
 
-    用于「移除单条历史」与头部「清除完成」：界面上历史与任务列表是同一块区域，
+    用于「移除单条历史」：界面上历史与任务列表是同一块区域，
     列表里清掉的条目必须在历史里一起消失，否则会被当成"按钮没生效"。
     """
     count = delete_history(req.ids)

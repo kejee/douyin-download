@@ -3282,6 +3282,61 @@ body {
     color: #f87171;
 }
 
+/* 批次行：一次批量提交（合集 / 多选）折叠成一行，点开才列出文件。
+   没有它的话，一次 500 集的合集会在往期区平铺 500 张卡片，把别的东西全淹掉。 */
+.task-batch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    margin-top: 2px;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: var(--radius-sm);
+    background: rgba(148, 163, 184, 0.06);
+    font-size: 12px;
+    color: var(--text-main);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.18s ease;
+}
+.task-batch-row:hover {
+    border-color: rgba(56, 189, 248, 0.5);
+    background: rgba(56, 189, 248, 0.07);
+}
+.task-batch-row.is-open {
+    border-color: rgba(56, 189, 248, 0.35);
+    background: rgba(56, 189, 248, 0.05);
+}
+.task-batch-icon {
+    flex-shrink: 0;
+    font-size: 11.5px;
+    color: #38bdf8;
+}
+.task-batch-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+.task-batch-meta {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.task-batch-row .btn-task-action {
+    flex-shrink: 0;
+}
+
+/* 展开的批次内容：用左侧竖线表达层级，避免和历史平铺条目混在一起看不清归属 */
+.task-batch-items {
+    margin-left: 10px;
+    padding-left: 8px;
+    border-left: 2px solid rgba(56, 189, 248, 0.25);
+}
+
 /* 历史条目卡片：比活跃任务卡片暗一档，避免和历史抢注意力 */
 .task-item-card.is-history {
     opacity: 0.82;

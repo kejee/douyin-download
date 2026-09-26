@@ -3,6 +3,7 @@ import re
 import io
 import asyncio
 import logging
+import time
 import zipfile
 import urllib.parse
 from typing import List, Optional
@@ -16,7 +17,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.5.0"
+APP_VERSION = "2.5.6.0"
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,34 @@ class ServerDownloadItem(BaseModel):
 class ServerBatchDownloadRequest(BaseModel):
     tasks: List[ServerDownloadItem]
 
+# 批次序号：同一毫秒内连续两次提交也要拿到不同 batch_id，
+# 否则两次批量会被历史记录当成同一批折叠起来。
+_batch_seq = 0
+
+
+def _batch_meta(items: List[ServerDownloadItem]) -> tuple:
+    """给一次批量提交分配 (batch_id, batch_title)。
+
+    单条提交**不带批次**（历史里就是一条独立记录，不参与折叠）。
+    多条提交共享同一个 batch_id：历史记录里折叠成一行，
+    淘汰时也只占一个"组"名额 —— 否则一次 500 集的合集就会把历史上限打满。
+
+    batch_title 优先用合集名（season_title），仅当一批里唯一且非空时才用，
+    否则退化为「批量下载 N 个」。
+    """
+    global _batch_seq
+    if len(items) <= 1:
+        return "", ""
+    title = ""
+    seasons = {(it.season_title or "").strip() for it in items}
+    if len(seasons) == 1:
+        title = next(iter(seasons))
+    if not title:
+        title = f"批量下载 {len(items)} 个"
+    _batch_seq += 1
+    return f"b_{int(time.time() * 1000)}_{_batch_seq}", title
+
+
 @app.get("/api/server/config")
 async def get_server_config():
     """获取服务端/NAS 存储配置"""
@@ -279,6 +308,7 @@ async def create_server_downloads(req: ServerBatchDownloadRequest):
     """提交一个或多个下载任务到服务端/NAS 自动归档"""
     created_tasks = []
     skipped: List[dict] = []
+    batch_id, batch_title = _batch_meta(req.tasks)
     for item in req.tasks:
         try:
             task = server_downloader.add_task(
@@ -296,6 +326,8 @@ async def create_server_downloads(req: ServerBatchDownloadRequest):
                 task_id=item.task_id,
                 direct_backup_urls=item.direct_backup_urls,
                 audio_backup_urls=item.audio_backup_urls,
+                batch_id=batch_id,
+                batch_title=batch_title,
             )
             created_tasks.append(task)
         except DuplicateTaskError as exc:
@@ -537,6 +569,7 @@ async def create_local_downloads(req: ServerBatchDownloadRequest):
     """提交下载任务到桌面端本地目录归档"""
     created_tasks = []
     skipped: List[dict] = []
+    batch_id, batch_title = _batch_meta(req.tasks)
     for item in req.tasks:
         try:
             task = server_downloader.add_task(
@@ -554,6 +587,8 @@ async def create_local_downloads(req: ServerBatchDownloadRequest):
                 task_id=item.task_id,
                 direct_backup_urls=item.direct_backup_urls,
                 audio_backup_urls=item.audio_backup_urls,
+                batch_id=batch_id,
+                batch_title=batch_title,
             )
             created_tasks.append(task)
         except DuplicateTaskError as exc:

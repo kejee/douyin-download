@@ -1411,24 +1411,45 @@ window._tmStructureSignature = null;
 //   2. 后端 history.json（任务终结时落盘，重启后仍在）。
 // ==========================================================================
 window.taskHistory = [];          // 后端持久化的历史（最近的在前）
-window._tmHistoryExpanded = false; // 历史区是否展开
+window._tmHistoryExpanded = false; // 往期区是否展开
+// 已展开的批次（batch_id 集合）。放在内存里即可：批次是"看历史"的临时视图，
+// 不值得落 localStorage，重启后回到折叠态反而更清爽。
+window._tmExpandedBatches = new Set();
 
-// 历史区最多渲染多少条：history.json 上限 500，全渲染会让 DOM 过重
+// 往期区与展开的批次最多各渲染多少项：history.json 条数上限 3000，
+// 全渲染会让 DOM 过重（一个 500 集的批次就是 500 个节点）
 const TM_HISTORY_RENDER_LIMIT = 50;
 
-function _tmIsActive(t) {
-    return t.status === 'running' || t.status === 'waiting' || t.status === 'paused' || t.status === 'error';
-}
-
+// 终态 = 已经结束、不会再变的状态。
+// 注意：`error` **不是**终态 —— 失败任务留在「本次任务」区等用户重试。
+// 「未结束」一律用 !_tmTerminal(t) 表示，不要再另写一份状态列表（会漏）。
 function _tmTerminal(t) {
     return t.status === 'success' || t.status === 'canceled';
 }
 
-// 合并「会话内终态任务」与「持久化历史」，按 id 去重，最近的在前
-function _tmHistoryItems() {
+// 分区模型（v2.5.6.0 起）：**按「本次会话 / 往期」分，而不是按状态分**。
+//
+// 旧模型按状态分（进行中 / 已完成与历史），结果是任务一完成就立刻离开「进行中」区、
+// 落进默认折叠的历史区 —— 卡片在视野里凭空消失，用户会问"我刚下的东西去哪了"。
+// 改用「本次 / 往期」之后，"完成"只让卡片就地变灰，不再退场。
+// 详见 MEMORY「完成即跳走」。
+
+// 本次任务 = 本会话提交的全部任务（含已完成）。
+// 未结束的（含失败，等用户重试）倒序在前 —— 保证运行中的任务永远在最上方；
+// 已完成的按完成时间倒序紧随其后，留在同一区域里。
+function _tmSessionTasks() {
+    const q = window.taskQueue;
+    const unfinished = q.filter(t => !_tmTerminal(t)).reverse();
+    const finished = q.filter(_tmTerminal)
+        .slice()
+        .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+    return [...unfinished, ...finished];
+}
+
+// 往期记录 = 持久化历史里「不属于本次会话」的那部分（重启后加载进来的）
+function _tmPastItems() {
     const liveIds = new Set(window.taskQueue.map(t => t.id));
-    const fromQueue = window.taskQueue.filter(_tmTerminal);
-    const persisted = window.taskHistory
+    return window.taskHistory
         .filter(h => !liveIds.has(h.id))
         .map(h => ({
             id: h.id,
@@ -1443,11 +1464,52 @@ function _tmHistoryItems() {
             platform: h.platform || '',
             finishedAt: h.finished_at || 0,
             errorMsg: h.error || '',
+            batchId: h.batch_id || '',
+            batchTitle: h.batch_title || '',
             fromHistory: true,
         }));
-    // 会话内的任务已经在数组里按提交顺序排列，历史需要按完成时间倒序
-    fromQueue.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
-    return [...fromQueue, ...persisted];
+}
+
+// 把往期记录按批次折叠。
+// 一次合集下载会产出成百上千条记录（实测有过 500 条），平铺会把往期区彻底淹掉、
+// 也让"按条淘汰"的上限被一次批量打满。同一次提交（batch_id 相同）合并成一行，
+// 展开才列出文件。
+function _tmGroupPast(items) {
+    const groups = [];
+    const byBatch = new Map();
+    items.forEach(it => {
+        const bid = (it.batchId || '').trim();
+        if (!bid) {
+            groups.push({ kind: 'single', item: it });
+            return;
+        }
+        let g = byBatch.get(bid);
+        if (!g) {
+            g = {
+                kind: 'batch', batchId: bid, title: it.batchTitle || '批量下载',
+                items: [], sizeBytes: 0, finishedAt: 0,
+            };
+            byBatch.set(bid, g);
+            groups.push(g);
+        }
+        g.items.push(it);
+        g.sizeBytes += it.sizeBytes || 0;
+        g.finishedAt = Math.max(g.finishedAt, it.finishedAt || 0);
+    });
+    // 批次内的文件按文件名自然序排（P01、P02…），而不是按完成先后 —— 后者受并发影响会乱
+    groups.forEach(g => {
+        if (g.kind === 'batch') {
+            g.items.sort((a, b) => String(a.filename).localeCompare(
+                String(b.filename), undefined, { numeric: true }));
+        }
+    });
+    return groups;
+}
+
+// 全部「已完成记录」条数：本次已完成的 + 往期。气泡文案与「清空已完成」按钮共用这个口径，
+// 避免两处数字对不上（历史上踩过）。
+function _tmCompletedCount(sessionTasks, pastItems) {
+    return sessionTasks.filter(_tmTerminal).length + pastItems.length;
 }
 
 // 入口气泡：常驻 + 分级
@@ -1499,7 +1561,8 @@ function updateTaskBubble() {
     if (textEl) {
         if (error > 0) textEl.textContent = `失败 ${error}`;
         else if (active > 0) textEl.textContent = running > 0 ? `下载中 (${running}/${active})` : `待下载 ${active}`;
-        else if (historyCount > 0) textEl.textContent = `历史 ${historyCount}`;
+        // 口径 = 已完成总数（本次 + 往期），与「清空 (N)」按钮一致
+        else if (historyCount > 0) textEl.textContent = `已完成 ${historyCount}`;
         else textEl.textContent = "下载管理";
     }
     if (badgeEl) {
@@ -1588,6 +1651,7 @@ function renderTaskManagerUI() {
         retryAllBtn.innerHTML = `<i class="fa-solid fa-arrows-rotate"></i> 重试 (${error})`;
     }
 
+
     // 总进度条
     const overallBar = document.getElementById("overallProgressBar");
     if (overallBar) {
@@ -1595,29 +1659,48 @@ function renderTaskManagerUI() {
         overallBar.style.width = `${percent}%`;
     }
 
-    const activeTasks = window.taskQueue.filter(_tmIsActive);
-    const historyItems = _tmHistoryItems();
+    const sessionTasks = _tmSessionTasks();
+    const pastItems = _tmPastItems();
+    const pastGroups = _tmGroupPast(pastItems);
+    const completedCount = _tmCompletedCount(sessionTasks, pastItems);
+    // 「还要处理」= 未结束的（含失败，等用户重试）
+    const unfinishedCount = sessionTasks.length - sessionTasks.filter(_tmTerminal).length;
 
-    // 徽章：优先反映"还要处理的量"，全处理完才退化为历史条数
+    // 「清空」按钮：计数口径必须与 clearDownloadHistory 完全一致（已完成总数 = 本次 + 往期），
+    // 否则按钮写着 3、实际清掉 5 条，用户会以为漏删或多删。
+    // 按钮放在头部工具条而不是往期行：它的作用范围横跨「本次任务」与「往期」两个区域，
+    // 挂在任一区域里都会出现"按钮范围 ≠ 所在区域"的歧义（v2.5.5.0 踩过）。
+    const clearBtn = document.getElementById("btnClearHistory");
+    if (clearBtn) {
+        clearBtn.style.display = completedCount > 0 ? "inline-flex" : "none";
+        clearBtn.innerHTML = `<i class="fa-solid fa-trash-can"></i> 清空 (${completedCount})`;
+    }
+
+    // 徽章：优先反映"还要处理的量"，全处理完才退化为已完成条数
     if (totalBadge) {
-        totalBadge.textContent = activeTasks.length
-            ? `${activeTasks.length} 项进行中`
-            : (historyItems.length ? `历史 ${historyItems.length}` : "0 项");
+        totalBadge.textContent = unfinishedCount
+            ? `${unfinishedCount} 项进行中`
+            : (completedCount ? `已完成 ${completedCount}` : "0 项");
     }
     if (navBadge) {
-        if (activeTasks.length) {
+        if (unfinishedCount) {
             navBadge.style.display = "inline-block";
-            navBadge.textContent = activeTasks.length;
+            navBadge.textContent = unfinishedCount;
         } else {
             navBadge.style.display = "none";
         }
     }
 
-    // 历史区的结构签名（含展开状态）与条数：只算一次，
+    // 往期区的结构签名（含展开状态与各批次的展开状态）与已完成条数：只算一次，
     // 供 _tmSignature 与 updateTaskBubble 复用（两者都在进度事件里高频调用）
-    window._tmHistorySig = `${window._tmHistoryExpanded ? 1 : 0}|`
-        + historyItems.map(h => `${h.id}:${h.status}`).join(',');
-    window._tmHistoryCount = historyItems.length;
+    window._tmHistorySig = [
+        window._tmHistoryExpanded ? 1 : 0,
+        Array.from(window._tmExpandedBatches || []).sort().join(','),
+        pastGroups.map(g => (g.kind === 'batch'
+            ? `B:${g.batchId}:${g.items.length}`
+            : `S:${g.item.id}:${g.item.status}`)).join('|'),
+    ].join('~');
+    window._tmHistoryCount = completedCount;
 
     updateTaskBubble();
 
@@ -1629,7 +1712,7 @@ function renderTaskManagerUI() {
     }
     window._tmStructureSignature = signature;
 
-    if (total === 0 && historyItems.length === 0) {
+    if (sessionTasks.length === 0 && pastGroups.length === 0) {
         listEl.innerHTML = `
             <div style="text-align: center; color: var(--text-dim); padding: 30px 10px; font-size: 12px;">
                 <i class="fa-solid fa-list-check" style="font-size: 24px; margin-bottom: 8px; color: var(--text-muted);"></i>
@@ -1642,52 +1725,87 @@ function renderTaskManagerUI() {
 
     const parts = [];
 
-    if (activeTasks.length) {
+    // ---- 本次任务：含已完成，完成的任务就地留在这里（不退场） ----
+    if (sessionTasks.length) {
         parts.push(`
             <div class="task-list-group">
                 <span class="task-list-group-title">
-                    <i class="fa-solid fa-bolt" style="color: #38bdf8;"></i> 进行中
-                    <span class="task-list-group-count">· ${activeTasks.length}</span>
+                    <i class="fa-solid fa-bolt" style="color: #38bdf8;"></i> 本次任务
+                    <span class="task-list-group-count">· ${sessionTasks.length}</span>
                 </span>
-                <span class="task-list-group-hint">新任务在最上方</span>
+                <span class="task-list-group-hint">${
+                    unfinishedCount ? `新任务在最上方 · ${unfinishedCount} 项进行中` : "全部已结束"
+                }</span>
             </div>
         `);
-        // 倒序渲染：刚加入的任务永远出现在最上面，不必往下滚
-        activeTasks.slice().reverse().forEach(t => parts.push(renderTaskCard(t, false)));
+        // 顺序由 _tmSessionTasks() 决定：未结束的（新→旧）在前，已完成的（新→旧）在后
+        sessionTasks.forEach(t => parts.push(renderTaskCard(t, false)));
     } else {
         parts.push(`
             <div style="color: var(--text-dim); padding: 6px 2px 2px; font-size: 12px;">
-                暂无进行中的任务
+                本次还没有任务
             </div>
         `);
     }
 
-    if (historyItems.length) {
+    // ---- 往期记录：只放重启后从 history.json 加载进来的，按批次折叠 ----
+    if (pastGroups.length) {
         const expandIcon = window._tmHistoryExpanded ? "fa-chevron-up" : "fa-chevron-down";
+        const batchCount = pastGroups.filter(g => g.kind === 'batch').length;
+        const countText = batchCount && batchCount !== pastGroups.length
+            ? `${pastGroups.length} 项（含 ${batchCount} 个批次 · ${pastItems.length} 个文件）`
+            : `${pastGroups.length} 项`;
         parts.push(`
-            <div class="task-history-collapse" data-tm-hist="toggle" title="${window._tmHistoryExpanded ? "收起历史记录" : "展开历史记录"}">
-                <span><i class="fa-solid fa-clock-rotate-left"></i> 已完成与历史 · ${historyItems.length}</span>
+            <div class="task-history-collapse" data-tm-hist="toggle" title="${window._tmHistoryExpanded ? "收起往期记录" : "展开往期记录"}">
+                <span><i class="fa-solid fa-clock-rotate-left"></i> 往期记录 · ${countText}</span>
                 <span class="task-history-collapse-actions">
-                    <span class="task-history-clear" data-tm-hist="clear" title="清空全部历史记录（不会删除已下载的文件）">清空历史</span>
                     <i class="fa-solid ${expandIcon}"></i>
                 </span>
             </div>
         `);
         if (window._tmHistoryExpanded) {
-            let shown = historyItems;
-            if (historyItems.length > TM_HISTORY_RENDER_LIMIT) {
-                shown = historyItems.slice(0, TM_HISTORY_RENDER_LIMIT);
+            let shown = pastGroups;
+            if (pastGroups.length > TM_HISTORY_RENDER_LIMIT) {
+                shown = pastGroups.slice(0, TM_HISTORY_RENDER_LIMIT);
                 parts.push(`
                     <div style="color: var(--text-dim); font-size: 11px; padding: 2px 2px 0;">
-                        仅显示最近 ${TM_HISTORY_RENDER_LIMIT} 条（共 ${historyItems.length} 条）
+                        仅显示最近 ${TM_HISTORY_RENDER_LIMIT} 项（共 ${pastGroups.length} 项）
                     </div>
                 `);
             }
-            shown.forEach(t => parts.push(renderTaskCard(t, true)));
+            shown.forEach(g => parts.push(
+                g.kind === 'batch' ? renderBatchRow(g) : renderTaskCard(g.item, true)
+            ));
         }
     }
 
     listEl.innerHTML = parts.join("");
+}
+
+// 往期里的一个批次：折叠成一行「合集名 · N 个文件 · 体积 · 时间」，点开展开文件
+function renderBatchRow(g) {
+    const open = window._tmExpandedBatches.has(g.batchId);
+    const timeText = g.finishedAt ? _tmFormatTime(g.finishedAt) : "";
+    const bid = escapeHtml(g.batchId);
+    const shown = open ? g.items.slice(0, TM_HISTORY_RENDER_LIMIT) : [];
+    return `
+        <div class="task-batch-row${open ? ' is-open' : ''}" data-batch-toggle="${bid}"
+             title="点击${open ? "收起" : "展开"} ${escapeHtml(g.title)}">
+            <i class="fa-solid fa-layer-group task-batch-icon"></i>
+            <span class="task-batch-title">${escapeHtml(g.title)}</span>
+            <span class="task-batch-meta">${g.items.length} 个文件 · ${formatBytes(g.sizeBytes)}${
+                timeText ? ` · ${timeText}` : ""
+            }</span>
+            <button class="btn-task-action" data-batch-remove="${bid}"
+                    title="从往期记录中移除整批（不会删除已下载的文件）">
+                <i class="fa-solid fa-trash-can"></i>
+            </button>
+            <i class="fa-solid ${open ? "fa-chevron-up" : "fa-chevron-down"}"></i>
+        </div>
+        ${shown.length ? `<div class="task-batch-items">${
+            shown.map(it => renderTaskCard(it, true)).join("")
+        }</div>` : ""}
+    `;
 }
 
 // 时间戳 → 「今天 15:50」/「09-23 15:50」，历史条目用
@@ -1725,9 +1843,11 @@ function renderTaskCard(t, isHistory) {
         : (t.sizeBytes ? formatBytes(t.sizeBytes) : "");
     const titleTip = t.savePath ? `${t.title} → ${t.savePath}` : t.title;
 
-    const platformTag = isHistory && t.platform && t.platform !== 'media'
+    // 平台与完成时间对「本次任务里已完成的卡片」同样有意义（现在它们和历史卡片
+    // 在同一屏里并排显示），因此不再用 isHistory 门控，只按有没有值决定。
+    const platformTag = t.platform && t.platform !== 'media'
         ? `<span class="task-item-platform">${escapeHtml(t.platform)}</span>` : "";
-    const timeTag = isHistory && t.finishedAt
+    const timeTag = t.finishedAt
         ? `<span class="task-item-time">${_tmFormatTime(t.finishedAt)}</span>` : "";
 
     return `
@@ -1809,9 +1929,25 @@ function renderTaskCard(t, isHistory) {
         if (act === "toggle") {
             window._tmHistoryExpanded = !window._tmHistoryExpanded;
             renderTaskManagerUI();
-        } else if (act === "clear") {
-            clearDownloadHistory();
         }
+    };
+
+    const toggleBatch = (batchId) => {
+        if (!batchId) return;
+        if (window._tmExpandedBatches.has(batchId)) window._tmExpandedBatches.delete(batchId);
+        else window._tmExpandedBatches.add(batchId);
+        renderTaskManagerUI();
+    };
+
+    // 移除整批：id 集合直接从当前分组里取，避免前端另存一份批次索引
+    const removeBatch = (batchId) => {
+        const group = _tmGroupPast(_tmPastItems()).find(g => g.batchId === batchId);
+        if (!group) return;
+        const ids = group.items.map(it => it.id);
+        window._tmExpandedBatches.delete(batchId);
+        window.taskHistory = window.taskHistory.filter(h => !ids.includes(h.id));
+        renderTaskManagerUI();
+        deleteHistoryRecords(ids);
     };
 
     const resolve = (e, attr) => (e.target && e.target.closest ? e.target.closest(`[data-${attr}]`) : null);
@@ -1821,8 +1957,23 @@ function renderTaskCard(t, isHistory) {
         if (groupEl) {
             if (e.pointerType === "mouse" && e.button !== 0) return;
             e.stopPropagation();
-            // 整行可点，但"清空历史"要按自己的语义走，不能被展开动作吞掉
             runGroupAction(groupEl);
+            return;
+        }
+        // 批次的「移除整批」按钮在可展开的行里，必须先判断它，
+        // 否则会被整行的展开动作吞掉（上行同理）
+        const batchRemove = resolve(e, "batch-remove");
+        if (batchRemove) {
+            if (e.pointerType === "mouse" && e.button !== 0) return;
+            e.stopPropagation();
+            removeBatch(batchRemove.dataset.batchRemove);
+            return;
+        }
+        const batchRow = resolve(e, "batch-toggle");
+        if (batchRow) {
+            if (e.pointerType === "mouse" && e.button !== 0) return;
+            e.stopPropagation();
+            toggleBatch(batchRow.dataset.batchToggle);
             return;
         }
         const btn = resolve(e, "task-action");
@@ -2236,41 +2387,44 @@ async function deleteHistoryRecords(ids) {
     }
 }
 
-// 清空「已完成与历史」区。
+// 清空**全部已完成记录**：本次会话的已完成/已取消 + 全部往期。
 //
-// 这里原本只清 window.taskHistory，结果本次会话刚完成、还在 taskQueue 里的任务
-// 清不掉（_tmHistoryItems 的 fromQueue 仍会返回它们），界面显示「已完成与历史 · 1」，
-// 看起来像按钮没生效，只有重启客户端才真的干净。历史区有两条数据来源，必须一起清。
+// 为什么放在抽屉头部而不是往期行上：它的范围横跨「本次任务」与「往期记录」两块区域，
+// 挂在任一块里都会出现"按钮范围 ≠ 所在区域"的歧义 —— 这在 v2.5.5.0 已经踩过一次
+// （点了「清空历史」历史区却还有东西，因为本次会话刚完成的那些不在清理范围内）。
+// 头部工具条本来就是全局批量操作区（暂停全部 / 开始全部 / 取消全部 / 重试），语义一致。
 //
-// 失败(error)任务刻意不动：它留在活跃区等用户重试或看失败原因，
-// 不该被"清空历史"顺手带走。
+// 失败(error)任务刻意不动：它留在「本次任务」区等用户重试或看失败原因，
+// 不该被"清空"顺手带走。
 //
 // 顺序上**先请求后端、成功后再改本地状态**。反过来（乐观更新 + 失败回滚）看着更快，
 // 但回滚不完整：本地已经把这批终态任务从 taskQueue 里删掉了，而 syncTaskStatusFromServer
 // 只能同步"已存在的任务"，救不回被删的条目，界面就停在"已清空"的假象上。
 // 请求走的是本机回环，这点延迟看不出来。
 async function clearDownloadHistory() {
-    const count = _tmHistoryItems().length;
+    const sessionTasks = _tmSessionTasks();
+    const pastItems = _tmPastItems();
+    // 计数口径与头部「清空 (N)」按钮完全一致，改一处必须改另一处
+    const count = _tmCompletedCount(sessionTasks, pastItems);
     if (!count) {
-        showToast("暂无历史记录", "info");
+        showToast("暂无已完成记录", "info");
         return;
     }
     try {
         const resp = await fetch("/api/history/clear", { method: "POST" });
         if (!resp.ok) throw new Error("清空失败");
     } catch (e) {
-        console.warn("清空历史失败:", e);
-        showToast("清空历史失败，请稍后再试", "error");
+        console.warn("清空已完成记录失败:", e);
+        showToast("清空失败，请稍后再试", "error");
         return;                       // 本地状态一个字节都没动，无需回滚
     }
-    const settledIds = window.taskQueue
-        .filter(t => t.status === 'success' || t.status === 'canceled')
-        .map(t => t.id);
+    const settledIds = sessionTasks.filter(_tmTerminal).map(t => t.id);
     window.taskQueue = window.taskQueue.filter(t => !settledIds.includes(t.id));
     window.taskHistory = [];
+    window._tmExpandedBatches.clear();
     window._tmStructureSignature = null;
     renderTaskManagerUI();
-    showToast(`已清空 ${count} 条历史记录（文件未被删除）`, "info");
+    showToast(`已清空 ${count} 条已完成记录（文件未被删除）`, "info");
 }
 
 // 取消全部：把所有活动任务（等待/下载中/已暂停）一次性取消
@@ -3333,7 +3487,44 @@ function saveImageFromPreview() {
 }
 
 document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeImagePreview();
+    if (e.key !== "Escape") return;
+    // 优先级按"谁在最上层"来：图片预览是全屏遮罩，先关它；它没开才轮到任务抽屉。
+    // Esc 关闭是桌面应用的硬惯例，而这个抽屉此前完全不响应 Esc
+    //（Esc 只关图片预览），用户只能去点右上角的收起箭头。
+    const box = document.getElementById("imagePreviewBox");
+    if (box && box.style.display !== "none") {
+        closeImagePreview();
+        return;
+    }
+    const drawer = document.getElementById("taskManagerDrawer");
+    if (drawer && drawer.style.display !== "none") toggleTaskManager(false);
+});
+
+// 点抽屉外的**空白处**收起抽屉。
+//
+// 只对非交互元素生效：点按钮 / 输入框 / 链接 / 下拉一律不收。
+// 这不是洁癖 —— 抽屉里有未提交状态（图集勾选、保存目录、并发设置），
+// 用户在"粘贴链接 → 提交"的过程中点一下主区按钮就被收起，会直接打断
+// "提交完看任务出现在列表里"这条动线。点真正的空白处才收起，规则简单可预测。
+//
+// 不加遮罩：这个面板是非模态的，价值就在于"边下边继续操作"，加遮罩会把这条路堵死。
+// 收起后的代价也很低 —— 入口气泡常驻，随时点回来。
+const _TM_OUTSIDE_IGNORE = [
+    "button", "a", "input", "select", "textarea", "label",
+    "[contenteditable='true']", ".modal-overlay", ".modal-card",
+    ".image-preview-overlay",
+].join(",");
+
+document.addEventListener("pointerdown", (e) => {
+    const drawer = document.getElementById("taskManagerDrawer");
+    if (!drawer || drawer.style.display === "none") return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (drawer.contains(t)) return;                       // 抽屉内部
+    const bubble = document.getElementById("taskManagerBubble");
+    if (bubble && bubble.contains(t)) return;             // 气泡自己负责开合
+    if (t.closest(_TM_OUTSIDE_IGNORE)) return;            // 交互元素 / 弹窗：不收起
+    toggleTaskManager(false);
 });
 
 // 页面初始化

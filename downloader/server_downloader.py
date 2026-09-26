@@ -70,6 +70,10 @@ class ServerTask(BaseModel):
     sessdata: Optional[str] = None
     channel: str = "server"  # server: NAS/服务端归档 | local: 桌面端本地保存
     platform: str = "media"  # 来源平台（bilibili / douyin / xhs ...），历史记录里要展示
+    # 批次信息：同一次批量提交（合集 / 多选）的任务共享 batch_id，
+    # 历史记录里折叠成一行，淘汰时也只占一个"组"名额。《单条提交为空》
+    batch_id: str = ""
+    batch_title: str = ""
     direct_backup_urls: List[str] = Field(default_factory=list, description="视频轨备用直链")
     audio_backup_urls: List[str] = Field(default_factory=list, description="音频轨备用直链")
     status: str = "waiting"  # waiting | running | paused | success | error
@@ -277,6 +281,8 @@ class ServerDownloadManager:
         task_id: Optional[str] = None,
         direct_backup_urls: Optional[List[str]] = None,
         audio_backup_urls: Optional[List[str]] = None,
+        batch_id: Optional[str] = None,
+        batch_title: Optional[str] = None,
     ) -> ServerTask:
         """解析归档路径并加入下载队列。
 
@@ -333,6 +339,8 @@ class ServerDownloadManager:
             sessdata=sessdata,
             channel=channel,
             platform=platform or "media",
+            batch_id=(batch_id or "").strip(),
+            batch_title=(batch_title or "").strip(),
             direct_backup_urls=list(direct_backup_urls or []),
             audio_backup_urls=list(audio_backup_urls or []),
             status="waiting",
@@ -841,6 +849,8 @@ class ServerDownloadManager:
                 created_at=task.created_at,
                 duration=max(0.0, time.time() - (task.created_at or time.time())),
                 error=task.error or "",
+                batch_id=getattr(task, "batch_id", "") or "",
+                batch_title=getattr(task, "batch_title", "") or "",
             )
         except Exception as e:
             logger.warning(f"[{task.id}] 写入下载历史失败: {e}")

@@ -494,6 +494,12 @@ function renderResult(data) {
         // 不可播放（实测 isPlayable=ERR(Operation Stopped)，表现就是预览区黑屏）。
         // 所以改为「点击 -> 后端混流成缓存文件 -> 以文件方式播放」，详见 preview.py。
         const isBiliStream = isBilibili && audioUrl;
+        // 直连模式：单轨平台默认仍把远程直链交给 <video> 直接播 —— 秒开、零磁盘、
+        // 零后端开销。只有**确实播不了**时才退回到 B站 那条「后端落盘再播」的链路
+        // （见 onPreviewDirectFailed）。这样既保住短视频的秒开，又给
+        // 「CDN 挑剔 Referer/UA、直链带签名会过期、AVFoundation 不吃这个源」
+        // 这类失败留了兜底 —— 原先这些情况一律是黑屏且没有任何补救。
+        const isDirectPlay = !isBiliStream && !!noWmUrl;
         const previewSrc = isBiliStream ? "" : noWmUrl;
 
         const durStr = video.duration ? formatDuration(video.duration) : "";
@@ -521,13 +527,18 @@ function renderResult(data) {
                     playsinline
                     preload="metadata"
                     referrerpolicy="no-referrer"
+                    ${isDirectPlay ? 'data-direct-play="1" onerror="onPreviewDirectFailed(this)"' : ''}
                     onloadedmetadata="onVideoMetadataLoaded(this)"
                 ></video>
-                ${isBiliStream ? `
-                <button type="button" class="preview-prepare-overlay" id="previewOverlay" onclick="startPreviewPrepare()">
+                ${(isBiliStream || isDirectPlay) ? `
+                <button type="button" class="preview-prepare-overlay" id="previewOverlay"
+                        style="${isBiliStream ? '' : 'display: none;'}"
+                        onclick="startPreviewPrepare()">
                     <span class="preview-play-btn"><i class="fa-solid fa-play"></i></span>
                     <span class="preview-prepare-text" id="previewPrepareText">点击准备预览</span>
-                    <span class="preview-prepare-hint">B站是音视频分离的，会先在本机完整缓存这段视频再播放（之后可拖动进度、可重播，缓存可清理）</span>
+                    <span class="preview-prepare-hint">${isBiliStream
+                        ? 'B站是音视频分离的，会先在本机完整缓存这段视频再播放（之后可拖动进度、可重播，缓存可清理）'
+                        : '直连播放不可用，改为在本机完整缓存后再播放（之后可拖动进度、可重播，缓存可清理）'}</span>
                     <span class="preview-prepare-track"><span class="preview-prepare-bar" id="previewPrepareBar"></span></span>
                 </button>` : ''}
             </div>
@@ -547,8 +558,9 @@ function renderResult(data) {
 
         // B站双轨预览的入口参数（点击「准备预览」时才真正开始混流）
         // 令牌自增用于作废上一次解析遗留的轮询，避免切视频后旧任务把新播放器改掉
-        window.pendingPreview = isBiliStream
-            ? { videoUrl: noWmUrl, audioUrl: audioUrl, title: cleanTitle }
+        // 直连模式也要登记参数：一旦直连失败，回退流程正是靠它去调 /api/preview/prepare
+        window.pendingPreview = (isBiliStream || isDirectPlay)
+            ? { videoUrl: noWmUrl, audioUrl: isBiliStream ? audioUrl : "", title: cleanTitle }
             : null;
         window.previewJobToken = (window.previewJobToken || 0) + 1;
 
@@ -843,6 +855,9 @@ function renderResult(data) {
     if (searchInput) searchInput.value = "";
     onEpisodeSearch("");
     resultContainer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    // 播放器是刚重建的，给直连模式装上看门狗（B站本来就是落盘，这里直接返回）
+    armDirectPlayWatchdog();
 }
 
 // 切换选集分P
@@ -886,6 +901,77 @@ async function switchEpisode(shareUrl, pageNum) {
 // 详见 downloader/preview.py 里的实测数据。
 // 改为落盘缓存后顺带的好处：可拖动进度条、可重播、第二次打开秒开。
 // ==========================================================================
+// --------------------------------------------------------------------------
+// 直连播放的失败兜底
+//
+// 单轨平台（抖音 / 小红书 / 快手 / 皮皮虾 / 推特）默认把远程直链交给 <video>
+// 直接播放：秒开、零磁盘、零后端开销，对短视频明显优于"先完整缓存再播"。
+//
+// 但这条路很脆：<video> 发不出自定义 Referer/UA/Cookie（页面还设了
+// referrerpolicy="no-referrer"），直链带签名会过期，CDN 也可能挑剔请求特征 ——
+// 一旦被拒就是黑屏 + 划掉的播放图标，且**没有任何补救入口**。
+//
+// 这里只在**确认失败**时退回到 B站 那条成熟链路（后端落盘 -> 以文件播放），
+// 成功路径一个字节都不碰。判定用两条：媒体 error 事件（403/解码失败会立刻触发）
+// 与"迟迟拿不到元数据"的看门狗（静默挂起时用）。
+// --------------------------------------------------------------------------
+
+// 直连等待上限。取 10s 偏保守：元数据在文件开头，正常直连通常 1~2s 就到位；
+// 超过 10s 还 readyState=0 基本就是被拒或超时，而不是"网慢"。
+// 宁可让真失败的等 10s，也不要把"能播只是慢"误判成失败而白等一次完整下载。
+const PREVIEW_DIRECT_TIMEOUT_MS = 10000;
+
+// 看门狗代次：换视频/换画质后旧定时器必须失效，否则会把新视频误判成失败
+window._previewDirectGen = 0;
+window._previewDirectTimer = null;
+
+function _clearDirectPlayWatchdog() {
+    if (window._previewDirectTimer) {
+        clearTimeout(window._previewDirectTimer);
+        window._previewDirectTimer = null;
+    }
+}
+
+// 渲染结果后调用：给直连模式的播放器装看门狗。非直连模式直接返回。
+function armDirectPlayWatchdog() {
+    _clearDirectPlayWatchdog();
+    const player = document.getElementById("mainVideoPlayer");
+    if (!player || player.dataset.directPlay !== "1") return;
+    const gen = ++window._previewDirectGen;
+    window._previewDirectTimer = setTimeout(() => {
+        if (gen !== window._previewDirectGen) return;                     // 已换视频/换画质
+        if (document.getElementById("mainVideoPlayer") !== player) return; // 陈旧节点
+        if (player.dataset.fallbackDone === "1") return;                  // 已回退过
+        if (player.readyState >= 1) return;                               // 拿到元数据 = 直连可用
+        onPreviewDirectFailed(player, "直连播放超时（未取到媒体信息）");
+    }, PREVIEW_DIRECT_TIMEOUT_MS);
+}
+
+// 直连播放失败 -> 切到后端落盘播放。
+// 整个过程**只做一次**（fallbackDone 标记）：落盘文件若也出错，不会再回退，
+// 否则会陷入"失败 -> 回退 -> 再失败"的死循环。
+function onPreviewDirectFailed(videoEl, reason) {
+    const player = videoEl || document.getElementById("mainVideoPlayer");
+    if (!player || player.dataset.directPlay !== "1") return;
+    if (player.dataset.fallbackDone === "1") return;
+    if (document.getElementById("mainVideoPlayer") !== player) return;   // 陈旧节点（已切视频）
+    const pending = window.pendingPreview;
+    if (!pending || !pending.videoUrl) return;
+
+    player.dataset.fallbackDone = "1";
+    _clearDirectPlayWatchdog();
+
+    const overlay = document.getElementById("previewOverlay");
+    if (!overlay) return;
+
+    console.warn("直连播放不可用，回退到本机缓存播放:", reason || "媒体加载失败");
+    // 必须把遮罩显出来：否则黑屏的播放器上没有任何反馈，看起来像点坏了
+    overlay.classList.remove("is-error");
+    overlay.style.display = "flex";
+    // 复用既有的准备流程：它负责进度、文案、以及完成后把 src 换成缓存文件
+    startPreviewPrepare();
+}
+
 function nextFrame() {
     return new Promise(resolve => {
         if (typeof requestAnimationFrame === "function") {
@@ -973,6 +1059,8 @@ async function startPreviewPrepare() {
 
 // 视频元数据加载完成后自适应比例
 function onVideoMetadataLoaded(videoEl) {    if (!videoEl) return;
+    // 元数据到手就说明这条直链是能用的，撤掉看门狗（不能让它晚点再触发一次回退）
+    _clearDirectPlayWatchdog();
     const container = videoEl.closest('.media-preview-container');
     const layout = videoEl.closest('.result-layout');
     if (!container) return;
@@ -2850,10 +2938,13 @@ function onQualitySelectChange(index) {
     const player = document.getElementById("mainVideoPlayer");
     if (player && q.video_url) {
         const bilisTream = isBilibili && q.audio_url;
+        // 换画质 = 换了一组直链，直连模式也要登记新参数（失败回退靠它）
         window.pendingPreview = bilisTream
             ? { videoUrl: q.video_url, audioUrl: q.audio_url, title: cleanTitle }
-            : null;
+            : { videoUrl: q.video_url, audioUrl: "", title: cleanTitle };
         window.previewJobToken = (window.previewJobToken || 0) + 1;   // 作废上一次轮询
+        // 旧的看门狗必须先撤掉，否则它会把"刚换上的新直链"当成上一个视频超时来处理
+        _clearDirectPlayWatchdog();
 
         const overlay = document.getElementById("previewOverlay");
         const iconEl = overlay ? overlay.querySelector(".preview-play-btn i") : null;
@@ -2875,6 +2966,14 @@ function onQualitySelectChange(index) {
         } else {
             if (overlay) overlay.style.display = "none";
             player.src = q.video_url;
+            // 换了新直链就必须重置兜底状态：新地址可能是好的。
+            // 不重置的话 fallbackDone 会一直是 "1"，新地址再失败也不会回退了。
+            player.dataset.fallbackDone = "";
+            if (textEl) textEl.textContent = "点击准备预览";
+            if (iconEl) iconEl.className = "fa-solid fa-play";
+            if (barEl) barEl.style.width = "0%";
+            if (hintEl) hintEl.textContent = "直连播放不可用，改为在本机完整缓存后再播放（之后可拖动进度、可重播，缓存可清理）";
+            armDirectPlayWatchdog();
         }
     }
 }

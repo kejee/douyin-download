@@ -29,16 +29,40 @@
 
 ## 💡 B 站 (Bilibili) 1080P / 4K 高清画质配置说明
 
-> [!NOTE]
-> B 站官方对未登录访客仅开放 **480P 清晰度**。若需在服务器上稳定解析 **1080P 原画** 或 **4K 超清**，只需在环境变量中配置任意一个免费注册的 B 站普通账号的 `SESSDATA`（普通账号即可解锁 1080P，无需充值大会员）：
+B 站官方对未登录访客仅开放 **480P**。配置一个 `SESSDATA` 即可解锁 **1080P 原画 / 4K 超清** ——
+**普通账号即可，无需大会员**。
+
+**怎么拿到**：浏览器登录 `bilibili.com` → 按 `F12` → `Application` → `Cookies` →
+`https://www.bilibili.com` → 复制 `SESSDATA` 的值。
+
+拿到之后，下面两种方式**任选一种**：
+
+| | 方式 A：网页里设置 | 方式 B：容器环境变量 |
+|---|---|---|
+| 入口 | 界面输入 B 站链接后出现提示条 → 「⚙️ 配置 SESSDATA」 | `docker-compose.yml` 的 `environment`，或 `docker run -e` |
+| 存在哪 | **各浏览器自己的 localStorage** | 容器内的环境变量 |
+| 生效范围 | **只对设置过的那一个浏览器生效** | **该容器上所有设备、所有浏览器都生效** |
+| 多设备时 | ⚠️ **每台设备都要各设一次** | ✅ **设一次就够**，之后新设备打开即可用 |
+| 适合 | 自己用、每人想用自己的账号 | NAS / 服务器多设备共享 |
+
+方式 B 的写法（两种任填其一）：
+
+```yaml
+environment:
+  - SESSDATA=your_bilibili_sessdata_here
+  # 如果你有完整 Cookie，也可以用它；优先级高于上一行
+  # - BILIBILI_COOKIE=SESSDATA=xxx; bili_jct=yyy
+```
+
+改完重启容器生效：`docker compose up -d --force-recreate`
+
+> [!IMPORTANT]
+> **优先级：网页里设的值 > `BILIBILI_COOKIE` > `SESSDATA`。**
+> 所以如果某个浏览器里**曾经设过**自己的（哪怕是旧账号），它会**覆盖**你在 compose 里配的环境变量。
+> 想让环境变量在那一台设备上也生效，去那个浏览器点「清除」再刷新即可。
 >
-> 1. 打开浏览器登录 `bilibili.com`，按 `F12` 打开开发者工具，在 `Application -> Cookies` 中复制 `SESSDATA` 对应的值；
-> 2. 在 `docker-compose.yml` 或服务器环境变量中添加：
->    ```yaml
->    environment:
->      - SESSDATA=your_bilibili_sessdata_here
->    ```
-> 3. 重启服务即可全局解锁 B 站 1080P / 720P / 4K 最高画质与博主全量批量极速下载！
+> 反过来这也很方便：多人共用的 NAS 上，环境变量提供一个公共账号，
+> **谁想用自己的账号，就在自己的浏览器里单独设一次**，互不影响。
 
 ---
 
@@ -99,7 +123,10 @@ xattr -dr com.apple.quarantine /Applications/UniversalDownloader.app
 
 ### 方式一：Docker Compose（推荐）
 
-本项目已提供标准的 `docker-compose.yml`，执行以下命令即可在后台启动服务：
+**适用于任何能跑 Linux 容器的 Docker 主机**：Linux 服务器、群晖、威联通、Docker Desktop（macOS / Windows）都可以。
+镜像里已自带 ffmpeg，**宿主机什么都不用装**。只有 NAS 需要额外注意挂载路径，见方式四。
+
+执行以下命令即可后台启动服务：
 
 ```bash
 # 克隆仓库
@@ -111,6 +138,17 @@ docker compose up -d
 ```
 启动后，在浏览器访问 `http://localhost:8000` 即可开始使用。
 
+**换一台主机部署时，需要检查下面几项**（都不是障碍，改配置即可）：
+
+| # | 项目 | 说明 |
+|---|---|---|
+| 1 | **端口** | 容器内恒为 8000，宿主端口随意映射；被占用就改 `"8000:8000"` 左边的数字 |
+| 2 | **持久化目录** | `./config`（设置 / 下载历史 / 预览缓存）与 `./downloads` **必须保留**，丢了等于「换个镜像历史全没」；也可改用命名卷 |
+| 3 | **PUID / PGID** | 决定下载文件的属主。填成你自己的 `id -u` / `id -g`，否则文件在宿主上可能不好管理 |
+| 4 | **目标架构** | 在 arm64 机器上**原生构建即可**（不用 `--platform`）；只有「在 Apple 芯片上给 x86 机器构建」才需要 `--platform linux/amd64` |
+| 5 | **代理** | 大陆环境解析 **YouTube / Twitter 需要代理**，且要填**局域网 IP**（容器里的 `127.0.0.1` 是容器自己）。抖音 / B站 / 小红书 / 快手 不需要 |
+| 6 | **时间** | 时区默认 `TZ=Asia/Shanghai`，影响下载历史里的时间显示 |
+
 ---
 
 ### 方式二：Docker 镜像一键运行
@@ -118,11 +156,19 @@ docker compose up -d
 直接使用 Dockerfile 构建并运行：
 
 ```bash
-# 1. 构建镜像
-docker build -t universal-downloader:v2.0.0.0 .
+# 1. 构建镜像（tag 要与下面 run 用的一致）
+docker build -t universal-downloader:latest .
 
 # 2. 运行容器
-docker run -d --name universal-downloader -p 8000:8000 --restart unless-stopped universal-downloader:v2.0.0.0
+#    -v 两个卷都不要省：config 存设置/下载历史/预览缓存，downloads 存下载文件
+#    少了它们，容器一重建数据就没了
+docker run -d --name universal-downloader \
+  -p 8000:8000 \
+  -e PUID=1000 -e PGID=1000 \
+  -v "$(pwd)/config:/config" \
+  -v "$(pwd)/downloads:/downloads" \
+  --restart unless-stopped \
+  universal-downloader:latest
 ```
 
 ---
@@ -149,6 +195,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ---
 
 ### 方式四：NAS 部署（威联通 / 群晖）
+
+> **这一节只针对 NAS。** 普通 Docker 主机（Linux 服务器 / Docker Desktop / 群晖的普通容器）
+> 直接用方式一即可，不需要看这里。
 
 威联通（Container Station）上挂载点必须写**绝对路径**，相对路径会落到应用程序自己的目录，
 看起来挂上了其实没有。按 NAS 上有没有构建环境选一条路：

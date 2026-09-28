@@ -3479,3 +3479,135 @@ body {
     font-size: 12px;
     color: var(--text-muted);
 }
+
+/* ==========================================================================
+   移动端适配：任务管理器（窄屏排版 + 滑动穿透）
+   --------------------------------------------------------------------------
+   1) 窄屏排版：桌面版的头部是"标题 + 一排按钮"的单行布局，前提是 600px 宽。
+      手机抽屉只有屏宽，而标题与按钮组都是 flex-shrink:0 + white-space:nowrap，
+      于是内容比抽屉宽 —— 抽屉又是 overflow:hidden，**右侧按钮被直接裁掉**
+      （表现为「取消全部」缺一条边）。这里改成标题一行、按钮组独占一行并允许换行。
+      「存储目的地」同理：标签会被压到折字（"存储目的 / 地:"），
+      所以让开关组和路径标签各自占整行。
+   2) 滑动穿透：抽屉内的列表滑到底后会带着**背后的页面**一起滚。
+      两处一起改才稳：列表加 overscroll-behavior:contain 断掉滚动接力；
+      抽屉打开时锁住 body（只在窄屏生效 —— 桌面端这个面板是非模态浮层，
+      锁住 body 就没法"边下边浏览"了）。
+   ========================================================================== */
+
+/* 列表滑到底不再把滚动"接力"给背景页面（桌面滚轮同样受益） */
+.task-manager-list {
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+.task-manager-drawer {
+    /* 抽屉自身也断一次，覆盖"列表不可滚但手指在抽屉其它区域滑动"的情况 */
+    overscroll-behavior: contain;
+}
+
+@media (max-width: 768px) {
+    /* 只有窄屏锁 body：见上面第 2 点 */
+    body.tm-drawer-open {
+        overflow: hidden;
+    }
+
+    /* 抽屉改成贴边的底部面板，宽度交给左右 8px 决定，避免 600px 定宽在手机上溢出 */
+    .task-manager-drawer {
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        width: auto;
+        max-width: none;
+        max-height: 78vh;
+        border-radius: var(--radius-md);
+    }
+
+    .task-manager-header {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px;
+    }
+
+    .task-manager-title {
+        font-size: 13px;
+    }
+
+    /* 按钮组独占一行；每行 3 个等分（6 个按钮时正好两行，含「关闭」） */
+    .task-manager-ctrls {
+        width: 100%;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px;
+    }
+
+    /* 手指点得着的尺寸：实测原先只有 28px 高，手机上太窄。
+       抬到 40px 并等分宽度，一行 3 个。 */
+    .btn-tm-ctrl {
+        font-size: 12px;
+        padding: 8px 10px;
+        min-height: 40px;
+        flex: 1 1 calc(33.333% - 6px);
+        justify-content: center;
+    }
+
+    .btn-tm-close {
+        font-size: 16px;
+        padding: 8px 10px;
+        min-height: 40px;
+        flex: 0 0 46px;
+    }
+
+    .task-destination-row {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 8px 12px;
+    }
+
+    /* 不折字：「存储目的地」曾在此处断成两行 */
+    .dest-label {
+        white-space: nowrap;
+    }
+
+    /* 开关组独占一行，两个按钮等分，文案不再折成两行 */
+    .dest-toggle-group {
+        flex: 1 1 100%;
+    }
+
+    .btn-dest-toggle {
+        flex: 1;
+        justify-content: center;
+        white-space: nowrap;
+    }
+
+    /* 路径标签也独占一行：原先被压成 "/downlo..." 看不出填的是什么。
+       必须写成 .dest-path-tip.is-editable —— 那条规则是双类选择器（优先级更高），
+       媒体查询本身不提升优先级，只写单类会被它压住。 */
+    .dest-path-tip.is-editable {
+        flex: 1 1 100%;
+        justify-content: center;
+        max-width: none;
+    }
+
+    .task-manager-summary {
+        padding: 10px 12px 8px;
+    }
+
+    /* 高度交给抽屉的 max-height 约束，列表自己滚 */
+    .task-manager-list {
+        max-height: none;
+        padding: 6px 10px;
+    }
+}
+
+@media (max-width: 420px) {
+    /* 极窄屏：再收一档，保证按钮不会折成三行 */
+    .task-manager-title {
+        font-size: 12.5px;
+    }
+
+    .btn-tm-ctrl {
+        font-size: 11px;
+        padding: 5px 8px;
+    }
+}

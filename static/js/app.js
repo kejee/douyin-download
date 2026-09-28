@@ -1614,10 +1614,15 @@ function toggleTaskManager(show = true) {
     if (show) {
         drawer.style.display = "flex";
         bubble.style.display = "none";
+        // 窄屏下这个抽屉几乎占满屏：锁住 body 滚动，否则在列表里滑动会带着
+        // 背后的页面一起滚。桌面端不锁（非模态浮层，要能边下边浏览），
+        // 所以这条规则写在 max-width: 768px 的媒体查询里。
+        document.body.classList.add("tm-drawer-open");
         renderTaskManagerUI();
         refreshPreviewCacheInfo();
     } else {
         drawer.style.display = "none";
+        document.body.classList.remove("tm-drawer-open");
         // 入口常驻：此前队列为空时气泡也一起消失，界面上就完全没有入口了，
         // 重启客户端后更是连历史都看不到。现在无论有没有任务都保留入口，
         // 由 updateTaskBubble 按状态分级显示（灰 / 有历史 / 有活跃 / 有失败）。

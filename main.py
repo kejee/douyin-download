@@ -17,7 +17,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.9.0"
+APP_VERSION = "2.6.0.0"
 
 logger = logging.getLogger(__name__)
 

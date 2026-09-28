@@ -83,8 +83,11 @@ services:
       - PGID=1000
       # 界面里改过归档目录后，以界面里的值为准；这里是**默认值**。
       - DOWNLOAD_DIR=/downloads
-      # 可选：B站 SESSDATA，解锁 1080P/4K
-      # - SESSDATA=your_sessdata_here
+      # ── 可选：B站 SESSDATA（解锁 1080P / 4K，普通账号即可，无需大会员）──
+      # 留空 = 不启用，完全等同于不写这一行（访客画质 480P）。填上自己的值重启即生效。
+      # 取值：浏览器登录 bilibili.com → F12 → Application → Cookies → 复制 SESSDATA。
+      # 注意：某个浏览器若在网页界面里单独设过，会**覆盖**这里的值（优先级更高）。
+      - SESSDATA=
       # 可选：解析 YouTube / Twitter 需要代理（填你局域网内的代理地址，
       #       不是 127.0.0.1 —— 容器里的 127.0.0.1 是容器自己）
       # - HTTP_PROXY=http://192.168.1.2:7890

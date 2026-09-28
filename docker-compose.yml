@@ -42,8 +42,11 @@ services:
       # 文件管理器里删不掉：Linux 用 `id -u` / `id -g` 查。
       - PUID=1000
       - PGID=1000
-      # 可选：B站 SESSDATA，用于解锁 1080P/4K（用你自己的账号）
-      # - SESSDATA=your_sessdata_here
+      # ── 可选：B站 SESSDATA（解锁 1080P / 4K，普通账号即可，无需大会员）──
+      # 留空 = 不启用，完全等同于不写这一行（访客画质 480P）。填上自己的值重启即生效。
+      # 取值：浏览器登录 bilibili.com → F12 → Application → Cookies → 复制 SESSDATA。
+      # 注意：某个浏览器若在网页界面里单独设过，会**覆盖**这里的值（优先级更高）。
+      - SESSDATA=
       # 可选：解析 YouTube / Twitter 需要代理
       # - HTTP_PROXY=http://192.168.1.2:7890
       # - HTTPS_PROXY=http://192.168.1.2:7890

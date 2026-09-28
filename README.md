@@ -54,6 +54,11 @@ environment:
   # - BILIBILI_COOKIE=SESSDATA=xxx; bili_jct=yyy
 ```
 
+> [!TIP]
+> **这一项可以留空，也可以先不填。** 写成 `- SESSDATA=`（空值）与完全不写这一行
+> **行为完全一致**，都是访客画质、不会报错；想用的时候填上值、重启容器即可。
+> 仓库里三份 compose 都已预留这个空项，不用自己猜该加在哪。
+
 改完重启容器生效：`docker compose up -d --force-recreate`
 
 > [!IMPORTANT]

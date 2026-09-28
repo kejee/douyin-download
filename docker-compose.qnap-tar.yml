@@ -9,11 +9,29 @@
 # ── 在 NAS 上要改的只有两处 ──────────────────────────────────────────
 # 1) PUID / PGID：SSH 登录后执行 `id`，看 uid= 和 gid=，把下面的 1000 换成它。
 #    不对的话，下载下来的文件在 File Station 里删不掉也改不了。
-# 2) 端口 8800：被占用就换一个。⚠️ 别用 8000 / 8080，威联通上几乎必冲突。
+#
+# 2) 端口 28760（可改）。
+#    为什么选它：
+#      · 避开 QNAP 官方登记的 QTS 服务端口，重点几组：
+#          Container Station 自己    61000-62000   ← 容器端口落这一段必冲突
+#          QVR Pro                   10100-11299 与 38000-42100
+#          NAS Web 及多个套件默认值   8080、8081、8088、8089、443、80
+#          WebDAV                    5000、5001
+#          iSCSI/rsync/RTRR/AFP/NFS/SMB/SSH  3260、873、8899、548、2049、445、22
+#        （完整清单：qnap.com/en/how-to/faq/con_show.php?cid=10）
+#      · 8000 不在官方清单里，但大量第三方镜像默认用它，社区冲突最多，一并避开；
+#      · 避开你已占用的 9088 / 5230 / 8096 / 8920；
+#      · 5 位数、无 IANA 注册服务，撞车概率极低；
+#      · 小于 32768，落在 Linux 临时端口段（32768-60999）之外，
+#        不会偶尔和"出去的连接"抢端口。
+#    部署前建议确认一次是否空闲：
+#        netstat -tlnp | grep 28760            # 无输出 = 空闲
+#        docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'   # 含已停止的容器
 #
 # ── 用法（NAS 的 SSH 里，与这两个文件同目录）──────────────────────────
 #   docker load -i universal-downloader-amd64.tar
 #   docker compose -f docker-compose.qnap-tar.yml up -d
+#   浏览器打开 http://<NAS 的 IP>:28760
 #
 # ── 如果存储池编号不是 CACHEDEV2 ─────────────────────────────────────
 #   SSH 执行 `ls /share` 能看到实际的 CACHEDEVn_DATA / ZFS 卷名，替换即可。
@@ -32,7 +50,7 @@ services:
     platform: linux/amd64
 
     ports:
-      - "8800:8000"          # 左边宿主机端口可按需改，右边容器内端口不要动
+      - "28760:8000"         # 左边是 NAS 上对外暴露的端口，可按需改；右边容器内端口不要动
 
     volumes:
       # 【必须挂载】设置与历史记录（settings.json / history.json / 预览缓存）。

@@ -22,34 +22,34 @@
 # 这样存储池编号变了也不用改。
 #
 # ══════════════════════════════════════════════════════════════════
-#  三条部署路线，按你的情况选一条（选路线 A 或 B 时记得删掉 build: 两行）
+#  三条部署路线，按你的情况选一条
 # ══════════════════════════════════════════════════════════════════
 #
-# 路线 A｜拉预构建镜像（最省事，NAS 上不用装任何构建环境）
+# 路线 A｜在 NAS 上就地构建（需要把源码放到 NAS 上）
+#     就是本文件的原样，`docker compose build` 即可。Intel 型号原生构建，最慢但不折腾。
+#
+# 路线 B｜在 Apple 芯片 Mac 上交叉构建 → 导出 tar → NAS 导入
+#     （**Intel 架构的 NAS 推荐这条**，且本文件用不上 —— 请改用
+#      `docker-compose.qnap-tar.yml`，那份不含 build:）
+#     Mac 上：
+#         docker build --platform linux/amd64 -t universal-downloader:latest .
+#         docker save -o universal-downloader-amd64.tar universal-downloader:latest
+#     NAS 上：
+#         docker load -i /share/Webs/universal-downloader-amd64.tar
+#         docker compose -f docker-compose.qnap-tar.yml up -d
+#     ⚠️ 必须用 qnap-tar 那份：本文件带 `build:`，会去 NAS 上就地重新构建，
+#        而 NAS 上没有源码 → 直接报错起不来。
+#
+# 路线 C｜拉预构建镜像（最省事，NAS 上不用装构建环境）
 #     image: ghcr.io/<你的用户名>/douyin-download:latest
 #     并**删掉**下面的 build: 两行。
 #     仓库的 GitHub Actions 会推 amd64 + arm64 多架构镜像。
-#
-# 路线 B｜在 Apple 芯片 Mac 上交叉构建 → 导出 tar → NAS 导入
-#     （**Intel 架构的 NAS 推荐这条**，实测有效，见下方 platform 说明）
-#     Mac 上执行：
-#         docker compose build          # 本文件已写死 platform: linux/amd64
-#         docker save -o universal-downloader-amd64.tar universal-downloader:latest
-#     NAS 上执行：
-#         Container Station → 镜像 → 导入（选那个 tar）
-#         或 SSH：docker load -i /share/Webs/universal-downloader-amd64.tar
-#     ⚠️ 导入镜像这条路**必须删掉下面的 build: 两行、只留 image:** ——
-#        否则 compose 会尝试在 NAS 上就地重新构建，而 NAS 上没有源码 → 直接报错。
-#
-# 路线 C｜在 NAS 上就地构建（需要把整个源码放到 NAS 上，且 NAS 装了构建环境）
-#     就是本文件的原样，`docker compose build` 即可。Intel 型号原生构建，最慢但不折腾。
 #
 services:
   universal-downloader:
     # ⚠️ 这一行是给**在 Apple 芯片 Mac 上构建**准备的，别删（除非你的 NAS 是 arm64）。
     #    M 系列 Mac 上不指定平台会构建出 arm64 镜像，导到 Intel NAS 上
-    #    容器会以 `exec format error` 起不来；不加 --platform 的 docker save
-    #    导出的就是那枚 arm64 镜像。
+    #    容器会以 `exec format error` 起不来。
     #    反过来说：**如果你的 NAS 是 ARM 型号（如 TS-233 / TS-133），
     #    把 amd64 改成 arm64，或直接删掉这一行。**
     #    在 Intel NAS 上这一行等于没写，留着完全无害。
@@ -62,9 +62,16 @@ services:
     container_name: universal-downloader
     restart: unless-stopped
     ports:
-      # ⚠️ 宿主机端口别用 8000/8080 —— 威联通自带服务与常见应用很容易占用，
-      #    冲突时容器会起不来。这里用 8800，按需改。
-      - "8800:8000"
+      # ⚠️ 宿主机端口有讲究，这里用 28760：
+      #    · 避开 QNAP 官方登记的 QTS 服务端口，重点是 61000-62000
+      #      （Container Station 自己占用）、10100-11299 与 38000-42100（QVR Pro）、
+      #      8080/8081/8088/8089/443/80、5000/5001、3260/873/8899/548/2049/445/22；
+      #      完整清单见 qnap.com/en/how-to/faq/con_show.php?cid=10
+      #    · 8000 不在官方清单里但第三方镜像默认用它，社区冲突最多，也避开；
+      #    · 避开已占用的 9088 / 5230 / 8096 / 8920；
+      #    · 5 位数、无注册服务；且小于 32768，不在 Linux 临时端口段内。
+      #    部署前建议确认一次：netstat -tlnp | grep 28760   （无输出=空闲）
+      - "28760:8000"
     volumes:
       # 【必须挂载】设置与历史记录。少了它，升级镜像后历史记录和 SESSDATA 都会丢。
       - /share/CACHEDEV2_DATA/Webs/universal-downloader/config:/config

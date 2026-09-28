@@ -180,7 +180,10 @@ docker run -d --name universal-downloader \
 
 ### 方式三：本地 Python 环境运行
 
-**环境要求**：Python 3.10+
+**环境要求**：Python 3.10+，以及 **ffmpeg** —— B站音视频双轨混流、视频预览准备都要用它。
+Docker 镜像里已内置，本地直接跑需要自己装好并确保在 `PATH` 里
+（macOS `brew install ffmpeg`，Ubuntu `apt install ffmpeg`）。
+缺它不影响普通单轨下载，但双轨与预览会失败并给出明确提示。
 
 ```bash
 # 1. 创建并激活虚拟环境 (可选)

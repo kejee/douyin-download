@@ -1552,57 +1552,145 @@ async function initServerArchiving() {
     updateTaskBubble();
     loadDownloadHistory();
 
+    // 服务端任务的同步分两层：
+    //   ① 全量快照 syncServerTasks() —— **界面能否看到任务的权威来源**
+    //   ② SSE 增量（/api/server/events）—— 只负责把进度刷得更实时
+    //
+    // 为什么必须以快照为准：SSE 是"一次性增量事件"，没有任何重放。它一旦没连上
+    // （浏览器长时间开着、网络中断、中间层缓冲、事件漏收），任务就**永远**不会
+    // 出现在界面上 —— 哪怕它正在跑、甚至已经下载完成。实测复现过：拦掉 SSE 后
+    // 提交任务，后端有任务、文件也落盘了，界面却一直显示「本次还没有任务」。
+    await syncServerTasks();
+    startServerEventStream();
+}
+
+// ---------------------------------------------------------------------------
+// 服务端任务同步
+// ---------------------------------------------------------------------------
+
+// 把一条服务端任务数据应用到前端队列。
+// SSE 增量与全量快照**共用同一份逻辑** —— 状态判断写成两份是这个项目踩过的老坑
+// （两份口径迟早会不一致，且不一致时表现为"按钮没生效"这类很难查的现象）。
+function applyServerTask(data, allowCreate = true) {
+    if (!data || !data.id) return false;
+    if (data.channel === "preview") return false;   // 预览缓存不在任务列表里呈现
+
+    const localTask = window.taskQueue.find(t => t.id === data.id);
+    if (localTask) {
+        // 前端刚发起暂停时，后端的 running 事件不应该把状态改回去，
+        // 否则表现成"点了暂停但还在下"。等收到非 running 的状态再解除保持。
+        const holdingPause = localTask.pendingPause && data.status === "running";
+        if (!holdingPause) {
+            localTask.status = data.status;
+            localTask.errorMsg = data.error;
+            if (data.status !== "running") localTask.pendingPause = false;
+        }
+        localTask.progress = data.progress;
+        // 体积进度（后端逐块统计，用来判断"是不是卡住了"）
+        if (typeof data.total_bytes === "number") {
+            localTask.totalBytes = data.total_bytes;
+            localTask.downloadedBytes = data.downloaded_bytes;
+        }
+        // 落盘绝对路径（供「在访达中显示」定位文件）
+        if (data.save_path) localTask.savePath = data.save_path;
+        // 进入终态时记下完成时间：历史区要按它倒序排列，
+        // 而且后端此时已经把这条写进 history.json，时间能对上。
+        if (['success', 'error', 'canceled'].includes(data.status) && !localTask.finishedAt) {
+            localTask.finishedAt = Date.now() / 1000;
+        }
+        return true;
+    }
+
+    if (!allowCreate) return false;
+    window.taskQueue.push({
+        id: data.id,
+        title: `[NAS] ${data.title}`,
+        filename: data.filename,
+        status: data.status,
+        progress: data.progress,
+        errorMsg: data.error,
+        savePath: data.save_path || '',
+        totalBytes: data.total_bytes,
+        downloadedBytes: data.downloaded_bytes,
+        finishedAt: ['success', 'error', 'canceled'].includes(data.status) ? Date.now() / 1000 : 0,
+        isServerTask: true,
+    });
+    return true;
+}
+
+// 拉一次服务端任务全量快照并与前端队列合并。
+// 这是「界面能看到服务端任务」的兜底：SSE 断了也靠它把界面拉回正确状态。
+//
+// 注意「不在队列里 + 已经终态」的任务**不补进来**：终态任务在界面上由「往期记录」
+// （history.json）呈现；这里若也无条件补，刷新一次页面就会把服务端内存里几十条
+// 旧任务全灌进「本次任务」，反而更乱。已在队列里的则一律更新（用它修正"SSE 断了
+// 导致任务卡在下载中"的状态）。
+async function syncServerTasks() {
+    try {
+        const resp = await fetch("/api/server/tasks");
+        if (!resp.ok) return false;
+        const tasks = (await resp.json()).tasks || [];
+        const qsig = () => window.taskQueue.map(t => `${t.id}:${t.status}:${t.progress}`).join('|');
+        const before = qsig();
+        tasks.forEach(t => {
+            const terminal = ['success', 'error', 'canceled'].includes(t.status);
+            applyServerTask(t, !terminal);
+        });
+        if (qsig() === before) return false;
+        // 这里刻意**不**调 notifyTasksSettled：页面刚打开时队列从空变满，
+        // 会误报一次"全部下载完成"。
+        renderTaskManagerUI();
+        return true;
+    } catch (e) {
+        return false;   // 网络抖动时静默，下一轮再同步
+    }
+}
+
+// SSE 断开期间的兜底轮询。
+// SSE 只推增量，断开期间发生的"新任务 / 完成 / 失败"全都收不到，必须靠轮询兜住。
+// 句柄挂在 window 上（而不是模块作用域的 let）：一是与 window.taskQueue 等既有状态
+// 风格一致，二是运行时可观测（调试"到底有没有在兜底"时很关键）。
+window._serverSyncTimer = null;
+
+function startServerSyncFallback() {
+    if (window._serverSyncTimer) return;
+    window._serverSyncTimer = setInterval(syncServerTasks, 5000);
+}
+
+function stopServerSyncFallback() {
+    if (window._serverSyncTimer) {
+        clearInterval(window._serverSyncTimer);
+        window._serverSyncTimer = null;
+    }
+}
+
+function startServerEventStream() {
     try {
         const evtSource = new EventSource("/api/server/events");
+        evtSource.onopen = () => {
+            // 连上就停掉兜底轮询，并补一次快照（把断开期间错过的变化补回来）
+            stopServerSyncFallback();
+            syncServerTasks();
+        };
+        evtSource.onerror = () => {
+            // EventSource 会自己重连；重连成功前的空窗期靠轮询兜底。
+            // 如果环境里 SSE 根本建不起来，这里会被反复调用 —— 等价于退化成轮询模式，
+            // 界面依然正确，只是进度刷新没那么实时。
+            startServerSyncFallback();
+        };
         evtSource.onmessage = (e) => {
             try {
-                const msg = JSON.parse(e.data);
-                const { event, data } = msg;
-                // 预览缓存任务（channel=preview）只在预览区呈现，不进任务列表
-                if (data && data.channel === "preview") return;
-                if (data && data.id) {
-                    const localTask = window.taskQueue.find(t => t.id === data.id);
-                    if (localTask) {
-                        // 前端刚发起暂停时，后端的 running 事件不应该把状态改回去，
-                        // 否则表现成"点了暂停但还在下"。等收到非 running 的状态再解除保持。
-                        const holdingPause = localTask.pendingPause && data.status === "running";
-                        if (!holdingPause) {
-                            localTask.status = data.status;
-                            localTask.errorMsg = data.error;
-                            if (data.status !== "running") localTask.pendingPause = false;
-                        }
-                        localTask.progress = data.progress;
-                        // 体积进度（后端逐块统计，用来判断"是不是卡住了"）
-                        if (typeof data.total_bytes === "number") {
-                            localTask.totalBytes = data.total_bytes;
-                            localTask.downloadedBytes = data.downloaded_bytes;
-                        }
-                        // 落盘绝对路径（供「在访达中显示」定位文件）
-                        if (data.save_path) localTask.savePath = data.save_path;
-                        // 进入终态时记下完成时间：历史区要按它倒序排列，
-                        // 而且后端此时已经把这条写进 history.json，时间能对上。
-                        if (['success', 'error', 'canceled'].includes(data.status) && !localTask.finishedAt) {
-                            localTask.finishedAt = Date.now() / 1000;
-                        }
-                        renderTaskManagerUI();
-                        notifyTasksSettled();
-                    } else if (event === "task_added" || data.status === "running") {
-                        window.taskQueue.push({
-                            id: data.id,
-                            title: `[NAS] ${data.title}`,
-                            filename: data.filename,
-                            status: data.status,
-                            progress: data.progress,
-                            errorMsg: data.error,
-                            savePath: data.save_path || '',
-                            isServerTask: true,
-                        });
-                        renderTaskManagerUI();
-                    }
+                const { event, data } = JSON.parse(e.data);
+                const tag = event === "task_added" || (data && data.status === "running");
+                if (applyServerTask(data, tag)) {
+                    renderTaskManagerUI();
+                    notifyTasksSettled();
                 }
             } catch (err) {}
         };
-    } catch (err) {}
+    } catch (err) {
+        startServerSyncFallback();
+    }
 }
 
 // 切换任务管理器显示/隐藏/最小化
@@ -2913,7 +3001,13 @@ async function submitTasksToServerArchive(items, options = {}) {
         }
         const created = res.count || 0;
         const skipped = res.skipped_count || 0;
+
+        // 把后端返回的任务对象直接入队 —— **不等 SSE**。
+        // SSE 只是增量通道，不能当作"任务能否显示"的唯一来源：它一旦没连上或漏了
+        // 事件，界面就会一直空白（实测复现过）。这里同步入队，界面立刻就能看到。
+        (res.tasks || []).forEach(t => applyServerTask(t, true));
         if (created > 0) {
+            renderTaskManagerUI();
             showToast(options.toastOk || `已提交 ${created} 个任务到 NAS 归档（存到挂载目录，不占本机）`, "success");
         } else if (skipped > 0) {
             const first = (res.skipped && res.skipped[0]) || {};

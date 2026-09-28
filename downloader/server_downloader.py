@@ -876,6 +876,11 @@ class ServerDownloadManager:
     def _record_history(self, task: "ServerTask", size_bytes: int = 0) -> None:
         """把终态任务写进下载历史。失败不抛异常（历史丢一条远好过任务被判失败）"""
         try:
+            # 预览缓存任务（channel="preview"）不是「下载」：它落在 preview_cache，
+            # 文件名还是个哈希（如 2e88a43ccf0c1993.mp4），写进下载历史只会让用户
+            # 在「往期记录」里看到一条莫名其妙的条目，还白占一个历史名额。
+            if getattr(task, "channel", "") == "preview":
+                return
             if not size_bytes:
                 size_bytes = task.downloaded_bytes or 0
                 if task.status == "success" and task.save_path and os.path.exists(task.save_path):

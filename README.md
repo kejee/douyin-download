@@ -127,7 +127,41 @@ docker run -d --name universal-downloader -p 8000:8000 --restart unless-stopped 
 
 ---
 
-### 方式三：本地 Python 环境运行
+### 方式三：威联通（QNAP）等无构建环境的 NAS —— 导入镜像 tar
+
+NAS 上通常没有源码、也不适合跑构建（尤其交叉架构）。做法是**在开发机构建好、导出 tar、传到 NAS 导入**。
+
+```bash
+# ① 在 Apple 芯片的 Mac 上构建 —— --platform 不能省！
+#    M 系列 Mac 不加它构建出的是 arm64 镜像，导到 Intel NAS 上容器会
+#    「exec format error」起不来。
+docker build --platform linux/amd64 -t universal-downloader:latest .
+
+# ② 导出前先核对架构，必须是 linux/amd64
+docker image inspect universal-downloader:latest --format '{{.Os}}/{{.Architecture}}'
+
+# ③ 导出
+docker save -o universal-downloader-amd64.tar universal-downloader:latest
+```
+
+```bash
+# ④ 上传到 NAS 并导入（NAS 的 SSH 里）
+docker load -i /share/Webs/universal-downloader/universal-downloader-amd64.tar
+
+# ⑤ 用专用 compose 启动（这份**不含 build:**，不会去就地重新构建）
+docker compose -f docker-compose.qnap-tar.yml up -d
+```
+
+仓库里已提供 `docker-compose.qnap-tar.yml`（威联通专用，绝对路径 + 不用构建），
+使用前只需改两处：`PUID`/`PGID`（SSH 执行 `id` 查）与端口（避开 8000/8080）。
+更完整的说明（存储池编号会变、挂载路径怎么填、权限与排错）见项目文档与技能 `qnap-docker-deploy`。
+
+> **为什么单独一份 compose**：如果沿用带 `build:` 的那份，`docker compose up -d`
+> 会尝试在 NAS 上就地重新构建，而 NAS 上没有源码 → 直接报错起不来。
+
+---
+
+### 方式四：本地 Python 环境运行
 
 **环境要求**：Python 3.10+
 

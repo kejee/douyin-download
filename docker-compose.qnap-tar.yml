@@ -1,0 +1,62 @@
+# Universal Downloader · 威联通（QNAP）· 本地构建 + tar 导入 专用
+#
+# 这一份是「在 Mac 上交叉构建 → docker save 成 tar → 传到 NAS 导入」的**成品**。
+#
+# 它**故意不含 `build:`** —— NAS 上通常没有源码，留着 build: 会让
+# `docker compose up -d` 去就地重新构建，报 failed to read dockerfile 而起不来。
+# 这是这条路最常见的卡点，所以单独立一份文件，避免"忘了删那两行"。
+#
+# ── 在 NAS 上要改的只有两处 ──────────────────────────────────────────
+# 1) PUID / PGID：SSH 登录后执行 `id`，看 uid= 和 gid=，把下面的 1000 换成它。
+#    不对的话，下载下来的文件在 File Station 里删不掉也改不了。
+# 2) 端口 8800：被占用就换一个。⚠️ 别用 8000 / 8080，威联通上几乎必冲突。
+#
+# ── 用法（NAS 的 SSH 里，与这两个文件同目录）──────────────────────────
+#   docker load -i universal-downloader-amd64.tar
+#   docker compose -f docker-compose.qnap-tar.yml up -d
+#
+# ── 如果存储池编号不是 CACHEDEV2 ─────────────────────────────────────
+#   SSH 执行 `ls /share` 能看到实际的 CACHEDEVn_DATA / ZFS 卷名，替换即可。
+#   若 `ls -l /share | grep Webs` 能看到软链，也可用 /share/Webs/... 代替，
+#   那样存储池编号变了也不用改这个文件。
+services:
+  universal-downloader:
+    # 镜像由 docker load 从 tar 导入到本地，compose 不会再联网拉取
+    image: universal-downloader:latest
+    container_name: universal-downloader
+    restart: unless-stopped
+
+    # Intel 型号的 NAS 上这一行等于没写，留着无害（它保证镜像架构与机器一致）。
+    # 如果你的 NAS 是 arm64 型号（如 TS-233），或 Container Station 的图形界面
+    # 报不认这个字段，把这一行删掉。
+    platform: linux/amd64
+
+    ports:
+      - "8800:8000"          # 左边宿主机端口可按需改，右边容器内端口不要动
+
+    volumes:
+      # 【必须挂载】设置与历史记录（settings.json / history.json / 预览缓存）。
+      # 少了它，升级镜像后历史记录和 SESSDATA 都会丢。
+      - /share/CACHEDEV2_DATA/Webs/universal-downloader/config:/config
+      # 【必须挂载】下载归档目录。想直接落到别的共享文件夹就改左边。
+      - /share/CACHEDEV2_DATA/Webs/universal-downloader/downloads:/downloads
+
+    environment:
+      - TZ=Asia/Shanghai
+      - PUID=1000            # ← 改成 `id` 查到的 uid
+      - PGID=1000            # ← 改成 `id` 查到的 gid
+      # 归档目录的**默认值**。之后在网页界面里改过，就以界面里的值为准。
+      - DOWNLOAD_DIR=/downloads
+      # 可选：B站 SESSDATA，解锁 1080P/4K（用你自己的账号）
+      # - SESSDATA=your_sessdata_here
+      # 可选：解析 YouTube / Twitter 需要代理。必须填**局域网**里的代理地址，
+      #       不能填 127.0.0.1（容器里的 127.0.0.1 是容器自己）。
+      # - HTTP_PROXY=http://192.168.1.2:7890
+      # - HTTPS_PROXY=http://192.168.1.2:7890
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

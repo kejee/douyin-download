@@ -125,6 +125,29 @@ async function readClipboardText() {
     return await navigator.clipboard.readText();
 }
 
+// 浏览器只在**安全上下文**（https 或 localhost）下才允许读剪贴板。
+// 用 http://<NAS 的 IP>:28760 打开页面时 navigator.clipboard 根本不存在，
+// 点了按钮只会弹一句报错 —— 所以干脆把它藏掉，别让用户以为功能坏了。
+// 桌面客户端走 pywebview 桥读系统剪贴板，不受这个限制，始终保留按钮。
+// 注意：输入框自身的 Ctrl/Cmd + V 一直可用，不依赖这个按钮。
+const CLIPBOARD_UNAVAILABLE_HINT = "当前页面不是安全上下文（http），浏览器不允许读取剪贴板 —— 请按 Ctrl/Cmd + V 直接粘贴";
+
+function canUseClipboard() {
+    if (window.isDesktop || hasNativeApi()) return true;
+    return !!(navigator.clipboard && navigator.clipboard.readText && window.isSecureContext);
+}
+
+function syncPasteButtonVisibility() {
+    const available = canUseClipboard();
+    ["pasteBtn", "creatorPasteBtn"].forEach((id) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.style.display = available ? "" : "none";
+        if (!available) btn.title = CLIPBOARD_UNAVAILABLE_HINT;
+    });
+    return available;
+}
+
 // 粘贴按钮
 pasteBtn.addEventListener("click", async () => {
     try {
@@ -138,7 +161,7 @@ pasteBtn.addEventListener("click", async () => {
             showToast("剪贴板为空", "info");
         }
     } catch (err) {
-        showToast("无法访问剪贴板，请手动粘贴", "error");
+        showToast(CLIPBOARD_UNAVAILABLE_HINT, "error");
     }
 });
 
@@ -358,6 +381,20 @@ function findActiveTaskByFilename(filename, subdir = null) {
 function triggerDownload(url, filename, options = {}) {
     if (!url) return;
     const safeFilename = filename || "download_media.mp4";
+
+    // NAS 归档模式：必须交给服务端落盘。塞进本地队列的话 runSingleTask
+    // 会走浏览器 Blob 下载 —— 文件就存到**打开页面这台电脑**上了。
+    if (!window.isDesktop && window.downloadDestination === "server") {
+        submitTasksToServerArchive([{
+            direct_url: url,
+            direct_backup_urls: backupsForUrl(url),
+            title: options.title || safeFilename,
+            filename: safeFilename,
+            subdir: options.subdir || null,
+            platform: options.platform || "media",
+        }]);
+        return;
+    }
 
     const dup = findActiveTaskByFilename(safeFilename, options.subdir || null);
     if (dup) {
@@ -1098,6 +1135,20 @@ function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
     const pageStr = String(pageNum).padStart(2, '0');
     const safeEpTitle = `${safeSeasonTitle}_P${pageStr}_${(epTitle || `第${pageNum}集`).replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30)}.mp4`;
 
+    // NAS 归档模式：交给服务端（否则浏览器下载会落到本机）
+    if (!window.isDesktop && window.downloadDestination === "server") {
+        submitTasksToServerArchive([{
+            url: shareUrl,
+            title: `${seasonTitle} P${pageNum}`,
+            filename: safeEpTitle,
+            season_title: seasonTitle,
+            page_num: pageNum,
+            platform: "bilibili",
+            sessdata: getBiliSessdata() || null,
+        }]);
+        return;
+    }
+
     const dup = findActiveTaskByFilename(safeEpTitle);
     if (dup) {
         showToast(`该分集已在下载队列中，未重复添加`, "info");
@@ -1293,6 +1344,7 @@ function hasNativeApi() {
 
 window.addEventListener("pywebviewready", () => {
     applyDesktopMode();
+    syncPasteButtonVisibility();
     refreshLocalDir();
 });
 
@@ -1492,6 +1544,8 @@ async function initServerArchiving() {
 
     // 此时 window.isDesktop 已确定（或退化为检测 pywebview 桥）
     initSponsorAd();
+    // http 页面下读不了剪贴板：把粘贴按钮藏掉，而不是让它点了报错
+    syncPasteButtonVisibility();
 
     // 入口常驻：先把气泡显示出来，历史拉回来后再按内容分级刷新。
     // 不能等历史/任务就绪才显示 —— 那正是"第一次有下载任务才出现入口"的老问题。
@@ -2831,6 +2885,43 @@ function syncConcurrencySelect() {
 // 分区之后终态任务已并入历史区，独立的「已完成列表」不复存在，
 // 这个按钮的作用域与「清空历史」重叠，且重叠处会出现"点了清不干净"的错觉。
 
+// 提交一批任务给**服务端/NAS 归档**（后端自己落盘到挂载目录）。
+//
+// 为什么需要它：浏览器的下载是"存到打开页面这台电脑"，而 NAS 归档是"存到
+// 容器挂载的目录"。两者只能选一个，前端必须在入队前就分开 —— 一旦塞进本地
+// taskQueue，runSingleTask 就会用 Blob 下载（必然落到本机）。
+// 原先只有「合集/分P」做了这个判断，单条视频、图集、单集下载都漏了。
+//
+// 返回是否至少创建了 1 个任务。
+async function submitTasksToServerArchive(items, options = {}) {
+    if (!items || !items.length) return false;
+    try {
+        const resp = await fetch("/api/server/download", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tasks: items }),
+        });
+        const res = await resp.json().catch(() => ({}));
+        if (!resp.ok || !res.success) {
+            showToast(res.detail || "提交 NAS 归档失败", "error");
+            return false;
+        }
+        const created = res.count || 0;
+        const skipped = res.skipped_count || 0;
+        if (created > 0) {
+            showToast(options.toastOk || `已提交 ${created} 个任务到 NAS 归档（存到挂载目录，不占本机）`, "success");
+        } else if (skipped > 0) {
+            const first = (res.skipped && res.skipped[0]) || {};
+            showToast(first.reason || "该文件已在归档队列中", "info");
+        }
+        if (options.openDrawer !== false) toggleTaskManager(true);
+        return created > 0;
+    } catch (e) {
+        showToast("网络请求异常: " + e.message, "error");
+        return false;
+    }
+}
+
 // 批量下载当前选集所有分集入口
 async function downloadAllEpisodes(mode = 'direct') {
     if (!window.currentMediaData || !window.currentMediaData.episodes) return;
@@ -2838,37 +2929,21 @@ async function downloadAllEpisodes(mode = 'direct') {
     const seasonTitle = window.currentMediaData.season_title || window.currentMediaData.title || "合集视频";
     const safeSeasonTitle = seasonTitle.replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 40);
 
-    // 如果用户当前选择了 NAS/服务端归档模式
-    if (window.downloadDestination === 'server') {
+    // 用户选了 NAS/服务端归档：整批一次提交，由后端建目录落盘
+    if (!window.isDesktop && window.downloadDestination === 'server') {
         const sessdata = getBiliSessdata();
-        const payload = {
-            tasks: episodes.map(ep => ({
+        const root = (window.serverConfig && window.serverConfig.download_dir) || "/downloads";
+        await submitTasksToServerArchive(
+            episodes.map(ep => ({
                 url: ep.share_url,
                 title: ep.title || `第${ep.page}集`,
                 season_title: seasonTitle,
                 platform: "bilibili",
                 page_num: ep.page,
                 sessdata: sessdata || null,
-            }))
-        };
-
-        try {
-            showToast(`正在向 NAS/服务端 提交 ${episodes.length} 个合集分P归档任务...`, "info");
-            const resp = await fetch("/api/server/download", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            const res = await resp.json();
-            if (resp.ok && res.success) {
-                toggleTaskManager(true);
-                showToast(`🎉 成功提交！NAS 正在自动在 /downloads/${safeSeasonTitle} 下建目录归档下载！`, "success");
-            } else {
-                showToast(res.detail || "提交服务端归档失败", "error");
-            }
-        } catch (e) {
-            showToast("网络请求异常: " + e.message, "error");
-        }
+            })),
+            { toastOk: `🎉 成功提交！NAS 正在自动在 ${root}/${safeSeasonTitle} 下建目录归档下载！` }
+        );
         return;
     }
 
@@ -2986,6 +3061,22 @@ function triggerMuxDownload(videoUrl, audioUrl, filename, options = {}) {
         return;
     }
     const safeFilename = filename || "bilibili_video.mp4";
+
+    // NAS 归档模式：音视频双轨也交给服务端混流落盘（理由同 triggerDownload）
+    if (!window.isDesktop && window.downloadDestination === "server") {
+        submitTasksToServerArchive([{
+            direct_url: videoUrl,
+            audio_url: audioUrl,
+            direct_backup_urls: backupsForUrl(videoUrl),
+            audio_backup_urls: backupsForUrl(audioUrl),
+            title: options.title || safeFilename,
+            filename: safeFilename,
+            subdir: options.subdir || null,
+            platform: options.platform || "media",
+        }]);
+        return;
+    }
+
     const taskId = `mux_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
     window.taskQueue.push({
@@ -3133,7 +3224,7 @@ if (creatorPasteBtn) {
                 showToast("已从剪贴板粘贴主页链接", "success");
             }
         } catch (err) {
-            showToast("无法访问剪贴板，请手动粘贴", "error");
+            showToast(CLIPBOARD_UNAVAILABLE_HINT, "error");
         }
     });
 }
@@ -3629,6 +3720,22 @@ function downloadAllImages() {
         return;
     }
     const title = galleryTargetTitle();
+
+    // NAS 归档模式：整批一次请求（逐张提交会开 N 次请求、弹 N 次提示）
+    if (!window.isDesktop && window.downloadDestination === "server") {
+        submitTasksToServerArchive(
+            indexes.map(idx => ({
+                direct_url: g.images[idx],
+                title: `${g.title}_图${idx + 1}.jpg`,
+                filename: `${g.title}_图${idx + 1}.jpg`,
+                subdir: title,
+                platform: "media",
+            })),
+            { toastOk: `已提交 ${indexes.length} 张原图到 NAS 归档（归档到「${title}」文件夹）` }
+        );
+        return;
+    }
+
     showToast(`正在依次加入选中的 ${indexes.length} 张原图（归档到「${title}」文件夹）...`, "info");
     indexes.forEach((idx, order) => {
         // 逐个错开入队：后端有并发上限，一次性全部提交也会排队，这里只是让顺序更直观
@@ -3688,7 +3795,10 @@ function saveImageFromPreview() {
     }
     triggerDownload(url, name, inGallery ? { subdir: galleryTargetTitle() } : undefined);
     closeImagePreview();
-    showToast("已加入下载任务", "success");
+    // NAS 归档模式下 triggerDownload 自己已经弹过提示，不再重复
+    if (window.isDesktop || window.downloadDestination !== "server") {
+        showToast("已加入下载任务", "success");
+    }
 }
 
 document.addEventListener("keydown", (e) => {

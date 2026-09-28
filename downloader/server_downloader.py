@@ -196,15 +196,47 @@ class ServerDownloadManager:
         logger.info(f"归档目录已切换为: {target}（挂载卷={persistent}）")
         return True, "", persistent
 
-    def _resolve_target(self, filename: str, subdir: str = "") -> str:
-        """算出目标文件的绝对路径（与 add_task 的落盘规则保持一致）"""
-        root = self.local_dir
-        if subdir:
-            root = os.path.join(root, self.sanitize_filename(subdir))
-        return os.path.join(root, self.sanitize_filename(filename))
+    def _plan_target(
+        self,
+        filename: str = "",
+        title: str = "",
+        subdir: str = "",
+        season_title: str = "",
+        platform: str = "media",
+        page_num: Optional[int] = None,
+        channel: str = "local",
+    ) -> tuple:
+        """算出「落盘目录 + 最终文件名」。
 
-    def unique_filename(self, filename: str, subdir: str = "") -> str:
-        """在目标目录里找一个不冲突的名字：xxx.mp4 -> xxx (1).mp4 -> xxx (2).mp4
+        **add_task 与「文件是否已存在」检查共用这一段**，这是刻意的：
+        路径规则写两份迟早会不一致 —— 而不一致的表现恰好就是"重复下载没有提示"
+        这类极难查的现象（检查看的是 A 目录，文件其实落在 B 目录），
+        以及旧版把 local_dir 写死导致归档通道查错目录。
+
+        返回 (target_folder, filename)。
+        """
+        root = self._root_for_channel(channel)
+
+        if filename:
+            resolved = self.sanitize_filename(filename)
+        else:
+            p_prefix = f"P{str(page_num).zfill(2)}_" if page_num else ""
+            resolved = f"{p_prefix}{self.sanitize_filename(title)}.mp4"
+
+        if subdir:
+            folder_name = self.sanitize_filename(subdir)
+        elif season_title:
+            folder_name = self.sanitize_filename(season_title)
+        elif channel in ("local", "preview"):
+            folder_name = ""      # 用户已选定保存目录 / 预览缓存直接平铺
+        else:
+            folder_name = self.sanitize_filename(platform)   # 归档：按平台建一层
+
+        target_folder = os.path.join(root, folder_name) if folder_name else root
+        return target_folder, resolved
+
+    def unique_filename(self, filename: str, target_folder: str) -> str:
+        """在指定目录里找一个不冲突的名字：xxx.mp4 -> xxx (1).mp4 -> xxx (2).mp4
 
         与 Finder 的「保留两者」命名习惯一致。
         """
@@ -214,18 +246,35 @@ class ServerDownloadManager:
             stem, ext = safe, ''
         for index in range(1, 1000):
             candidate = f"{stem} ({index})" + (f".{ext}" if ext else "")
-            if not os.path.exists(self._resolve_target(candidate, subdir)):
+            if not os.path.exists(os.path.join(target_folder, candidate)):
                 return candidate
         return safe
 
-    def check_local_file(self, filename: str, subdir: str = "") -> Dict[str, Any]:
+    def check_local_file(
+        self,
+        filename: str,
+        subdir: str = "",
+        channel: str = "local",
+        season_title: str = "",
+        platform: str = "media",
+        title: str = "",
+        page_num: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """下载前检查目标文件是否已存在
 
         供前端弹窗让用户选择「覆盖重下」还是「保留两者」。只读操作。
+
+        目录口径完全交给 _plan_target（与落盘同一段逻辑），调用方**不需要**、
+        也不应该自己去拼目录 —— 只要把提交时的那几个字段原样传进来即可。
+        channel="local" 查本地保存目录（桌面端保存）；
+        channel="server" 查归档目录（NAS/服务端归档）。
         """
-        safe = self.sanitize_filename(filename)
-        info: Dict[str, Any] = {"exists": False, "filename": safe, "suggested": safe}
-        target = self._resolve_target(safe, subdir)
+        target_folder, resolved = self._plan_target(
+            filename=filename, title=title, subdir=subdir, season_title=season_title,
+            platform=platform, page_num=page_num, channel=channel,
+        )
+        info: Dict[str, Any] = {"exists": False, "filename": resolved, "suggested": resolved}
+        target = os.path.join(target_folder, resolved)
         if not os.path.isfile(target):
             return info
         try:
@@ -236,7 +285,7 @@ class ServerDownloadManager:
             "exists": True,
             "size_text": _fmt_size(stat.st_size),
             "mtime_text": time.strftime("%m-%d %H:%M", time.localtime(stat.st_mtime)),
-            "suggested": self.unique_filename(safe, subdir),
+            "suggested": self.unique_filename(resolved, target_folder),
         })
         return info
 
@@ -261,14 +310,25 @@ class ServerDownloadManager:
         logger.info(f"定位文件 | {target} | {'成功' if ok else '失败'}")
         return ok
 
-    def list_local_files(self, subdir: str = "") -> Dict[str, Any]:
-        """列出桌面端保存目录下的文件名
+    def list_local_files(
+        self,
+        subdir: str = "",
+        channel: str = "local",
+        season_title: str = "",
+        platform: str = "media",
+    ) -> Dict[str, Any]:
+        """列出目标目录下已有的文件名
 
-        供前端在批量下载前跳过「本地已存在」的集数。只读操作，不改动任何文件。
+        供前端在批量下载前跳过「已存在」的集数。只读操作，不改动任何文件。
+        目录口径同样交给 _plan_target（与落盘一致），调用方不必自己拼目录。
+        channel="local" 列本地保存目录（桌面端）；channel="server" 列归档目录（NAS）。
         """
-        target = self.local_dir
-        if subdir:
-            target = os.path.join(self.local_dir, self.sanitize_filename(subdir))
+        target, _ = self._plan_target(
+            subdir=subdir or "",
+            season_title=season_title or "",
+            platform=platform or "media",
+            channel=channel,
+        )
         if not os.path.isdir(target):
             return {"dir": target, "exists": False, "files": []}
         try:
@@ -335,25 +395,17 @@ class ServerDownloadManager:
         2. 合集/多P    -> {root}/{合集名}/P01_{标题}.mp4
         3. 普通单作品  -> {root}/{平台}/{标题}.mp4（桌面端本地保存则平铺，不建平台子目录）
         """
-        root = self._root_for_channel(channel)
-        safe_title = self.sanitize_filename(title)
-
-        if filename:
-            resolved = self.sanitize_filename(filename)
-        else:
-            p_prefix = f"P{str(page_num).zfill(2)}_" if page_num else ""
-            resolved = f"{p_prefix}{safe_title}.mp4"
-
-        if subdir:
-            folder_name = self.sanitize_filename(subdir)
-        elif season_title:
-            folder_name = self.sanitize_filename(season_title)
-        elif channel in ("local", "preview"):
-            folder_name = ""  # 用户已选定保存目录 / 预览缓存直接平铺
-        else:
-            folder_name = self.sanitize_filename(platform)
-
-        target_folder = os.path.join(root, folder_name) if folder_name else root
+        # 目录与文件名一律交给 _plan_target —— 与「文件是否已存在」检查
+        # （check_local_file）共用同一段逻辑，避免两边各拼一次路径而渐渐不一致。
+        target_folder, resolved = self._plan_target(
+            filename=filename or "",
+            title=title,
+            subdir=subdir or "",
+            season_title=season_title or "",
+            platform=platform or "media",
+            page_num=page_num,
+            channel=channel,
+        )
         ensure_dir(target_folder)
         filename = resolved
         save_path = os.path.join(target_folder, filename)

@@ -382,6 +382,16 @@ function triggerDownload(url, filename, options = {}) {
     if (!url) return;
     const safeFilename = filename || "download_media.mp4";
 
+    // 队列里已有指向同一目标文件的活动任务 → 两条通道都拦掉。
+    // 这个检查原先写在下面的服务端分流**之后**，于是 NAS 模式下被 return 跳过，
+    // 只剩后端 DuplicateTaskError 兜底（能拦住，但提示要到下一次网络往返才出现）。
+    const dup = findActiveTaskByFilename(safeFilename, options.subdir || null);
+    if (dup) {
+        showToast(`「${safeFilename}」已在下载队列中，未重复添加`, "info");
+        toggleTaskManager(true);
+        return;
+    }
+
     // NAS 归档模式：必须交给服务端落盘。塞进本地队列的话 runSingleTask
     // 会走浏览器 Blob 下载 —— 文件就存到**打开页面这台电脑**上了。
     if (!window.isDesktop && window.downloadDestination === "server") {
@@ -393,13 +403,6 @@ function triggerDownload(url, filename, options = {}) {
             subdir: options.subdir || null,
             platform: options.platform || "media",
         }]);
-        return;
-    }
-
-    const dup = findActiveTaskByFilename(safeFilename, options.subdir || null);
-    if (dup) {
-        showToast(`「${safeFilename}」已在下载队列中，未重复添加`, "info");
-        toggleTaskManager(true);
         return;
     }
 
@@ -1135,6 +1138,16 @@ function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
     const pageStr = String(pageNum).padStart(2, '0');
     const safeEpTitle = `${safeSeasonTitle}_P${pageStr}_${(epTitle || `第${pageNum}集`).replace(/[\r\n\\/:*?"<>|]+/g, '_').slice(0, 30)}.mp4`;
 
+    // 队列检查放在服务端分流**之前**：放在它后面的话 NAS 模式下会被 return 跳过。
+    // 刻意不带 subdir 比对：服务端任务镜像进队列时不带子目录信息，带上反而匹配不到
+    // （宁可多拦一次，也不要漏拦之后静默覆盖归档里的文件）。
+    const dup = findActiveTaskByFilename(safeEpTitle);
+    if (dup) {
+        showToast(`该分集已在下载队列中，未重复添加`, "info");
+        toggleTaskManager(true);
+        return;
+    }
+
     // NAS 归档模式：交给服务端（否则浏览器下载会落到本机）
     if (!window.isDesktop && window.downloadDestination === "server") {
         submitTasksToServerArchive([{
@@ -1146,13 +1159,6 @@ function downloadSingleEpisode(shareUrl, pageNum, epTitle) {
             platform: "bilibili",
             sessdata: getBiliSessdata() || null,
         }]);
-        return;
-    }
-
-    const dup = findActiveTaskByFilename(safeEpTitle);
-    if (dup) {
-        showToast(`该分集已在下载队列中，未重复添加`, "info");
-        toggleTaskManager(true);
         return;
     }
 
@@ -1492,15 +1498,28 @@ function askDuplicateFile(info) {
 }
 
 // 返回 "proceed"（直接下）/ {filename}（改名后下）/ "cancel"
-async function resolveFilenameConflict(task) {
-    if (!window.isDesktop || !task.filename) return "proceed";
+//
+// channel="local"  → 查桌面端保存目录。只有桌面端才有意义：浏览器模式下文件落在
+//                    用户自己电脑上，服务端根本看不到，无从检查。
+// channel="server" → 查 NAS 归档目录。NAS 模式下必须用它，否则重复下载
+//                    既没有提示、又会静默覆盖掉归档里已有的文件。
+async function resolveFilenameConflict(task, channel = "local") {
+    if (!task || !task.filename) return "proceed";
+    if (channel === "local" && !window.isDesktop) return "proceed";
+
+    const endpoint = channel === "server" ? "/api/server/check" : "/api/local/check";
     try {
-        const resp = await fetch("/api/local/check", {
+        const resp = await fetch(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            // 原样把提交时的那几个字段传过去，**目录由后端按同一套规则算** ——
+            // 前端自己拼目录就等于把路径规则写了两份，迟早会不同步
+            // （本次「重复下载没提示」正是这么来的）。
             body: JSON.stringify({
                 filename: task.filename,
-                subdir: task.seasonTitle || null,
+                subdir: task.subdir || null,
+                season_title: task.season_title || task.seasonTitle || null,
+                platform: task.platform || "media",
             }),
         });
         if (!resp.ok) return "proceed";
@@ -1513,9 +1532,79 @@ async function resolveFilenameConflict(task) {
         return "cancel";
     } catch (e) {
         // 检查失败不该阻塞下载，按覆盖继续
-        console.warn("检查本地同名文件失败，按覆盖继续:", e);
+        console.warn("检查同名文件失败，按覆盖继续:", e);
         return "proceed";
     }
+}
+
+// 提交到 NAS 归档之前的重复处理。返回处理后的任务数组（空 = 全部跳过或用户取消）。
+//
+//   单条 → 弹窗问「覆盖重下 / 保留两者 / 取消」，与桌面端保存的行为一致；
+//   批量 → **静默跳过归档里已存在的**，最后汇总提示一句。
+//          一次可能提交几百个文件（整部合集），逐个弹窗是灾难。
+async function resolveArchiveConflicts(items) {
+    if (!items || !items.length) return items;
+
+    if (items.length === 1) {
+        const item = items[0];
+        const decision = await resolveFilenameConflict(item, "server");
+        if (decision === "cancel") {
+            showToast(`已取消「${item.filename}」的下载`, "info");
+            return [];
+        }
+        if (decision && decision.filename) {
+            return [{ ...item, filename: decision.filename }];
+        }
+        return items;
+    }
+
+    // 批量：按「会落到同一个目录」的字段组合分组，每组拉一次清单，再按文件名比对。
+    // 分组键是 (subdir, season_title, platform) —— 这三个决定后端往哪个目录写
+    // （规则见后端 _plan_target），只有同组内的文件才平铺在同一个目录里。
+    const keyOf = (i) => JSON.stringify([i.subdir || "", i.season_title || "", i.platform || "media"]);
+    const groups = new Map();
+    items.forEach(i => {
+        const k = keyOf(i);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(i);
+    });
+
+    // 文件名规范化：与后端 sanitize_filename 对齐的轻量版本。
+    // 两边规则若不一致，出现的不是"误删"而是"没识别出已存在"（退化成重新下载覆盖），
+    // 所以两边各规范化一次更稳。
+    const norm = (n) => String(n || "")
+        .replace(/[\r\n\\/:*?"<>|]+/g, "_")
+        .replace(/^[ ._]+/, "")
+        .replace(/[ ._]+$/, "");
+
+    const kept = [];
+    for (const group of groups.values()) {
+        const head = group[0];
+        let existing = new Set();
+        try {
+            const qs = new URLSearchParams({
+                subdir: head.subdir || "",
+                season_title: head.season_title || "",
+                platform: head.platform || "media",
+            });
+            const resp = await fetch(`/api/server/files?${qs.toString()}`);
+            if (resp.ok) existing = new Set((((await resp.json()).files) || []).map(norm));
+        } catch (e) {
+            // 拉不到清单就照常提交，不因为检查失败而挡住下载
+        }
+        group.forEach(i => { if (!existing.has(norm(i.filename))) kept.push(i); });
+    }
+
+    const skipped = items.length - kept.length;
+    if (skipped > 0) {
+        showToast(
+            kept.length
+                ? `已跳过 ${skipped} 个归档里已存在的文件（共 ${items.length} 个）`
+                : `${items.length} 个文件归档里都已存在，未重复下载`,
+            "info"
+        );
+    }
+    return kept;
 }
 
 // 初始化服务端/NAS配置与SSE
@@ -2988,6 +3077,15 @@ function syncConcurrencySelect() {
 // 返回是否至少创建了 1 个任务。
 async function submitTasksToServerArchive(items, options = {}) {
     if (!items || !items.length) return false;
+
+    // 归档目录里已有同名文件时先处理：单条弹窗、批量跳过。
+    // 少了这一步，重复下载既没有任何提示、又会静默覆盖掉归档里的原文件
+    // （此前只有桌面端保存那条通道有检查，归档通道一直缺失）。
+    if (options.checkDuplicates !== false) {
+        items = await resolveArchiveConflicts(items);
+        if (!items.length) return false;
+    }
+
     try {
         const resp = await fetch("/api/server/download", {
             method: "POST",
@@ -3160,6 +3258,15 @@ function triggerMuxDownload(videoUrl, audioUrl, filename, options = {}) {
         return;
     }
     const safeFilename = filename || "bilibili_video.mp4";
+
+    // 与 triggerDownload 一致：队列检查必须在服务端分流**之前**，
+    // 否则 NAS 模式下会被下面的 return 跳过（这里原先连检查都没有）。
+    const dup = findActiveTaskByFilename(safeFilename, options.subdir || null);
+    if (dup) {
+        showToast(`「${safeFilename}」已在下载队列中，未重复添加`, "info");
+        toggleTaskManager(true);
+        return;
+    }
 
     // NAS 归档模式：音视频双轨也交给服务端混流落盘（理由同 triggerDownload）
     if (!window.isDesktop && window.downloadDestination === "server") {

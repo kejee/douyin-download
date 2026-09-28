@@ -17,7 +17,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.6.1.0"
+APP_VERSION = "2.6.2.0"
 
 logger = logging.getLogger(__name__)
 
@@ -464,25 +464,76 @@ async def set_local_config(req: LocalDirRequest):
         raise HTTPException(status_code=400, detail="目录不存在或不可写")
     return {"success": True, "download_dir": server_downloader.local_dir}
 
-class LocalCheckRequest(BaseModel):
+class CheckFileRequest(BaseModel):
+    """「目标文件是否已存在」的检查参数。
+
+    字段刻意与提交下载时保持一致：目录口径由后端 _plan_target 统一决定，
+    前端**不需要**（也不应该）自己去拼目录 —— 两份路径规则迟早会不一致，
+    那正是「重复下载没有提示」这个缺陷的根源。
+    """
     filename: str
     subdir: Optional[str] = None
+    season_title: Optional[str] = None
+    platform: Optional[str] = None
 
 @app.post("/api/local/check")
-async def check_local_file(req: LocalCheckRequest):
-    """下载前检查目标文件是否已存在
+async def check_local_file(req: CheckFileRequest):
+    """检查**桌面端保存目录**下是否已有同名文件
 
     桌面端用它决定是否弹出「覆盖重下 / 保留两者」的选择。只读。
     """
-    return server_downloader.check_local_file(req.filename, req.subdir or "")
+    return server_downloader.check_local_file(
+        req.filename,
+        subdir=req.subdir or "",
+        season_title=req.season_title or "",
+        platform=req.platform or "media",
+        channel="local",
+    )
 
 @app.get("/api/local/files")
-async def list_local_files(subdir: str = ""):
+async def list_local_files(subdir: str = "", season_title: str = "", platform: str = "media"):
     """列出桌面端保存目录下的文件名
 
     供前端批量下载前跳过「本地已存在」的集数，避免重复拉取。只读。
     """
-    return server_downloader.list_local_files(subdir)
+    return server_downloader.list_local_files(
+        subdir=subdir,
+        season_title=season_title,
+        platform=platform,
+        channel="local",
+    )
+
+
+@app.post("/api/server/check")
+async def check_archive_file(req: CheckFileRequest):
+    """检查**归档目录**里是否已有同名文件（NAS/服务端归档用）
+
+    此前只有桌面端保存通道做这个检查（/api/local/check），归档通道完全缺失 ——
+    结果是「NAS 上重复下载同一个视频」既没有任何提示、又会静默覆盖掉原文件。
+    channel="server" 让检查落在归档目录（server_dir），而不是本地保存目录。
+    只读。
+    """
+    return server_downloader.check_local_file(
+        req.filename,
+        subdir=req.subdir or "",
+        season_title=req.season_title or "",
+        platform=req.platform or "media",
+        channel="server",
+    )
+
+@app.get("/api/server/files")
+async def list_archive_files(subdir: str = "", season_title: str = "", platform: str = "media"):
+    """列出归档目录下已有的文件名
+
+    供前端在 NAS 批量下载前跳过「归档里已存在」的集数。
+    批量场景不能逐个弹窗（一次可能几百个文件），只能静默跳过 + 汇总提示。只读。
+    """
+    return server_downloader.list_local_files(
+        subdir=subdir,
+        season_title=season_title,
+        platform=platform,
+        channel="server",
+    )
 
 class RevealRequest(BaseModel):
     path: str

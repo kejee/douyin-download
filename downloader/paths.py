@@ -104,6 +104,78 @@ def save_local_dir(path: str) -> bool:
     return save_settings(data)
 
 
+def load_server_dir() -> str:
+    """NAS/服务端归档目录的用户覆写值（为空表示沿用环境变量给的默认值）"""
+    value = (load_settings().get("server_dir") or "").strip()
+    if value and os.path.isdir(value):
+        return value
+    return ""
+
+
+def save_server_dir(path: str) -> bool:
+    path = (path or "").strip()
+    if not path or not ensure_dir(path):
+        return False
+    data = load_settings()
+    data["server_dir"] = path
+    return save_settings(data)
+
+
+# 这些文件系统即使被挂载，内容也不跨重启/重建保留 —— 不能算"持久"。
+# 尤其 tmpfs：它是独立挂载点，只按"是否落在非根挂载点上"判断会误判成安全，
+# 而 /tmp 恰恰是最容易被误填的地方。overlay/rootfs 是容器自己的可写层，
+# 同理；真正绑进来的卷会显示宿主机的文件系统类型（ext4/xfs/btrfs…）。
+_VOLATILE_FS = frozenset({
+    "tmpfs", "devtmpfs", "proc", "sysfs", "cgroup", "cgroup2", "devpts",
+    "overlay", "rootfs", "mqueue", "securityfs", "debugfs", "ramfs",
+})
+
+
+def _read_mount_points(mounts_file: str) -> list:
+    """读「持久」挂载点列表（/proc/mounts 的第二列，已剔除易失文件系统）"""
+    points = []
+    with open(mounts_file, "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            if len(parts) >= 3 and parts[2].lower() in _VOLATILE_FS:
+                continue
+            # /proc/mounts 里空格被转义成 \040
+            points.append(parts[1].replace("\\040", " "))
+    return points
+
+
+def is_persistent_mount(path: str, mounts_file: str = "/proc/mounts") -> bool:
+    """判断路径是否落在**挂载卷**上（只有挂载卷会跨容器重建保留）。
+
+    用途：用户在 Web 上把归档目录改到容器内的普通目录（如 /tmp/x）时，
+    下载能成功、界面上一切正常，但**容器一重建文件就没了** —— 这是 NAS 部署里
+    最隐蔽的一类损失。这里提前识别并让界面给出警告，而不是替用户拦下来
+    （确实有人只想临时存一份）。
+
+    mounts_file 可注入是**为了可测**：macOS 上没有 /proc/mounts，
+    不注入的话这段判断在开发机上永远走不到，等于没测过。
+    读不到挂载表时一律返回 True（不误报）。
+    """
+    try:
+        mount_points = _read_mount_points(mounts_file)
+    except (OSError, UnicodeDecodeError):
+        return True
+    if not mount_points:
+        return True
+
+    target = os.path.realpath(path)
+    best = "/"
+    for point in mount_points:
+        real = os.path.realpath(point)
+        if target == real or target.startswith(real.rstrip("/") + "/"):
+            if len(real) > len(best):
+                best = real
+    # 命中的最长挂载点仍是根文件系统 => 落在容器可写层，重建即丢
+    return best != "/"
+
+
 # 同时下载数：界面可调（1~8），默认 3。
 # 太小浪费带宽，太大容易触发平台限流与磁盘抖动，也给批量任务留出处理余量。
 DEFAULT_MAX_CONCURRENT = 3

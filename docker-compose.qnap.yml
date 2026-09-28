@@ -1,0 +1,62 @@
+# Universal Downloader · 威联通（QNAP）Container Station 专用
+#
+# 为什么单独给一份：威联通上挂载点必须写**绝对路径**。
+# 相对路径（./config）在 Container Station 里会落到应用程序自己的目录，
+# 位置随应用名变化、重建应用还会变 —— 用户以为挂上了，其实没有。
+#
+# ── 部署前只需改两处 ────────────────────────────────────────────────
+# 1. 存储池编号：下面的 CACHEDEV2 要换成你自己的。
+#    SSH 登录后执行 `ls /share` 就能看到，形如 CACHEDEV1_DATA / CACHEDEV2_DATA。
+#    ⚠️ 这个编号会随存储池/卷的增删而变化（加块硬盘就可能从 2 变 3），
+#       换过硬盘后 compose 会突然挂载失败，回来改这里即可。
+#
+# 2. PUID / PGID：两个数字，决定下载下来的文件属于谁。
+#    不对的话，文件在 File Station 里会显示成别的用户、你删不掉也改不了。
+#    查法（SSH）：
+#        id              # 当前用户，看 uid= 和 gid=
+#        ls -n /share/Webs/universal-downloader/downloads   # 看已有目录的属主数字
+#
+# ── 更稳的路径写法（可选）────────────────────────────────────────────
+# 如果 `ls -l /share | grep <共享文件夹名>` 能看到软链，
+# 就用 /share/<共享文件夹名>/... 代替 /share/CACHEDEVn_DATA/<共享文件夹名>/...，
+# 这样存储池编号变了也不用改。
+services:
+  universal-downloader:
+    # 路线 A（推荐）：直接拉预构建的多架构镜像，NAS 上不用装构建环境。
+    #   仓库已有 GitHub Actions 在推 amd64+arm64 的镜像；把下面两行换成：
+    #     image: ghcr.io/kejee/douyin-download:latest
+    #   并**删掉** build: 那两行。
+    # 路线 B：在 Container Station 里就地构建（需要 build context 里的源码）。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: universal-downloader:latest
+    container_name: universal-downloader
+    restart: unless-stopped
+    ports:
+      # ⚠️ 宿主机端口别用 8000/8080 —— 威联通自带服务与常见应用很容易占用，
+      #    冲突时容器会起不来。这里用 8800，按需改。
+      - "8800:8000"
+    volumes:
+      # 【必须挂载】设置与历史记录。少了它，升级镜像后历史记录和 SESSDATA 都会丢。
+      - /share/CACHEDEV2_DATA/Webs/universal-downloader/config:/config
+      # 【必须挂载】下载归档目录（想直接存到别的共享文件夹就改左边）。
+      - /share/CACHEDEV2_DATA/Webs/universal-downloader/downloads:/downloads
+    environment:
+      - TZ=Asia/Shanghai
+      - PUID=1000
+      - PGID=1000
+      # 界面里改过归档目录后，以界面里的值为准；这里是**默认值**。
+      - DOWNLOAD_DIR=/downloads
+      # 可选：B站 SESSDATA，解锁 1080P/4K
+      # - SESSDATA=your_sessdata_here
+      # 可选：解析 YouTube / Twitter 需要代理（填你局域网内的代理地址，
+      #       不是 127.0.0.1 —— 容器里的 127.0.0.1 是容器自己）
+      # - HTTP_PROXY=http://192.168.1.2:7890
+      # - HTTPS_PROXY=http://192.168.1.2:7890
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

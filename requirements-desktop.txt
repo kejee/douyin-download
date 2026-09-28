@@ -7,3 +7,6 @@
 -r requirements.txt
 pyinstaller>=6.0.0
 imageio-ffmpeg>=0.5.0
+# 桌面窗口用它承载界面（macOS 走 WKWebView、Windows 走 WebView2、Linux 走 GTK/Qt）。
+# 只有桌面端需要：Web/服务端与 Docker 镜像都不装它，所以它不在 requirements.txt 里。
+pywebview>=5.0.0

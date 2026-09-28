@@ -14,9 +14,12 @@ from downloader.paths import (
     default_download_dir,
     ensure_dir,
     is_desktop_mode,
+    is_persistent_mount,
     load_local_dir,
     load_max_concurrent,
+    load_server_dir,
     reveal_in_file_manager,
+    save_server_dir,
     save_local_dir,
     save_max_concurrent,
 )
@@ -93,7 +96,10 @@ class ServerDownloadManager:
     RETRY_BACKOFF = (1.0, 2.5)
 
     def __init__(self, download_dir: str = DOWNLOAD_DIR, max_concurrent: Optional[int] = None):
-        self.server_dir = download_dir
+        # 归档根目录：**用户在 Web 上改过的值优先**，否则用环境变量给的默认值。
+        # 这样 NAS 用户不必为了换个存储位置重建容器（改 compose + 重启）。
+        self.default_server_dir = download_dir
+        self.server_dir = load_server_dir() or download_dir
         self.local_dir = load_local_dir() if is_desktop_mode() else download_dir
         self.max_concurrent = max_concurrent or load_max_concurrent()
         # 惰性建目录：失败不影响进程启动（历史坑：import 期 makedirs 导致双击崩溃）
@@ -132,14 +138,20 @@ class ServerDownloadManager:
 
     def get_config(self) -> Dict[str, Any]:
         active_root = self.local_dir if is_desktop_mode() else self.server_dir
+        persistent = is_persistent_mount(self.server_dir)
         return {
             "download_dir": self.server_dir,
             "server_dir": self.server_dir,
+            # 环境变量给的默认值：界面上提供「恢复默认」要回到这里
+            "default_server_dir": self.default_server_dir,
             "local_dir": self.local_dir,
             "max_concurrent": self.max_concurrent,
             "is_nas_mode": bool(os.getenv("DOWNLOAD_DIR")),
             "is_desktop": is_desktop_mode(),
             "free_space_gb": self._get_free_space_gb(active_root),
+            # 归档目录是否落在挂载卷上。false 表示文件会随容器重建消失，
+            # 界面据此给出警告（不阻止，只提示）。
+            "persistent": persistent,
         }
 
     def set_local_dir(self, path: str) -> bool:
@@ -151,6 +163,38 @@ class ServerDownloadManager:
         save_local_dir(path)
         logger.info(f"本地保存目录已切换为: {path}")
         return True
+
+    def set_server_dir(self, path: str) -> tuple:
+        """设置 NAS/服务端归档目录，返回 (是否成功, 失败原因, 是否落在挂载卷上)。
+
+        只影响**后续**任务：已经算好落盘路径的在途任务不受影响（改不了它们的目标文件）。
+
+        校验比 set_local_dir 严一些，因为这里的报错用户看不到容器内部：
+        - 必须是绝对路径 —— NAS 的 compose 里挂载的是容器内路径，
+          相对路径会解析到进程 cwd，用户根本猜不到文件去哪了；
+        - 允许自动创建（用户填的往往是挂载卷里的一个新子目录）；
+        - 必须可写，否则要提示到 PUID/PGID 与共享文件夹权限，
+          这是威联通上最常见的失败原因。
+        """
+        raw = (path or "").strip()
+        if not raw:
+            return False, "路径不能为空", False
+        if not os.path.isabs(raw):
+            return False, "请填写容器内的绝对路径（例如 /downloads/B站）", False
+
+        target = os.path.abspath(raw)
+        if os.path.exists(target) and not os.path.isdir(target):
+            return False, "该路径已被一个文件占用", False
+        if not os.path.isdir(target) and not ensure_dir(target):
+            return False, "目录不存在且无法创建，请检查挂载与权限", False
+        if not os.access(target, os.W_OK):
+            return False, "目录不可写：请检查 PUID/PGID 与共享文件夹权限", False
+
+        self.server_dir = target
+        save_server_dir(target)
+        persistent = is_persistent_mount(target)
+        logger.info(f"归档目录已切换为: {target}（挂载卷={persistent}）")
+        return True, "", persistent
 
     def _resolve_target(self, filename: str, subdir: str = "") -> str:
         """算出目标文件的绝对路径（与 add_task 的落盘规则保持一致）"""

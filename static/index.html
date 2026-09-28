@@ -8,9 +8,9 @@
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
-    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.7.0">
-    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.7.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.5.7.0">
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.5.8.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.5.8.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.5.8.0">
 </head>
 
 <body>
@@ -214,7 +214,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.5.7.0</span>
+                    <span class="badge badge-version">v2.5.8.0</span>
                 </div>
             </div>
         </footer>
@@ -326,6 +326,33 @@
         </div>
     </div>
 
+    <!-- NAS/服务端归档目录（改完立即对后续任务生效，不必重建容器） -->
+    <div class="modal-overlay" id="serverDirModal">
+        <div class="modal-card" style="max-width: 520px;">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fa-solid fa-folder-tree text-gradient"></i> 更改归档目录
+                </div>
+                <button class="modal-close" id="closeServerDirBtn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <p class="dup-file-desc" style="margin-bottom: 10px;">
+                    填写<strong>容器内的绝对路径</strong>。只有 compose 里挂载过的目录才可靠 ——
+                    填到没挂载的路径上，下载能成功，但容器一重建文件就没了。
+                </p>
+                <input type="text" id="serverDirInput" class="form-input" spellcheck="false"
+                       placeholder="/downloads">
+                <p class="dup-file-hint" id="serverDirHint"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary-sm" id="serverDirResetBtn">
+                    <i class="fa-solid fa-rotate-left"></i> 恢复默认
+                </button>
+                <button class="btn-primary" id="serverDirSaveBtn">保存</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 批量下载任务管理器 (悬浮弹窗/抽屉) -->
     <div class="task-manager-drawer" id="taskManagerDrawer" style="display: none;">
         <div class="task-manager-header">
@@ -367,7 +394,12 @@
                     <i class="fa-solid fa-server text-gradient"></i> NAS/服务端归档
                 </button>
             </div>
-            <span class="dest-path-tip" id="destPathTip" style="display: none;" title="NAS 服务端下载根路径">/downloads</span>
+            <button type="button" class="dest-path-tip is-editable" id="destPathTip" style="display: none;"
+                    onclick="openServerDirEditor()"
+                    title="NAS/服务端归档目录（点击修改，只影响后续任务）">
+                <span id="destPathText">/downloads</span>
+                <i class="fa-solid fa-pen"></i>
+            </button>
         </div>
         <!-- 桌面客户端：本地保存位置（选择目录 / 打开目录） -->
         <div class="task-destination-row desktop-save-bar" id="desktopSaveBar" style="display: none;">
@@ -424,7 +456,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.5.7.0"></script>
+    <script src="/static/js/app.js?v=2.5.8.0"></script>
 </body>
 
 </html>

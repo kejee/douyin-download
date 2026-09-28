@@ -1167,8 +1167,8 @@ function setDownloadDestination(mode) {
             serverBtn.classList.add("active");
             localBtn.classList.remove("active");
             if (tipEl) {
-                tipEl.style.display = "inline-block";
-                tipEl.textContent = (window.serverConfig && window.serverConfig.download_dir) || "/downloads";
+                tipEl.style.display = "inline-flex";
+                setDestPathLabel((window.serverConfig && window.serverConfig.download_dir) || "/downloads");
             }
         } else {
             localBtn.classList.add("active");
@@ -1177,6 +1177,112 @@ function setDownloadDestination(mode) {
         }
     }
 }
+
+// ==========================================================================
+// NAS / 服务端归档目录：在界面上直接改，不必改 compose 再重建容器
+//
+// 背景：原先归档目录只能由 DOWNLOAD_DIR 环境变量决定，NAS 用户想换个存储位置
+// 就得重建容器 —— 而重建会丢掉正在排队的任务。现在改成持久化设置，界面上可改。
+//
+// 两个必须守住的口径：
+// 1) 只影响**后续**任务（在途任务的目标路径在入队时就算好了，改不了）；
+// 2) 写进没挂载的路径时**警告但不阻止** —— 文件能下、界面正常，但容器重建就没了，
+//    这是 NAS 上最隐蔽的一类数据损失，所以要明确提示。
+// ==========================================================================
+
+// 路径显示在<b>内部 span</b> 上：外层是个按钮、里面还有铅笔图标，
+// 直接写 textContent 会把图标一起抹掉。
+function setDestPathLabel(text) {
+    const inner = document.getElementById("destPathText");
+    if (inner) {
+        inner.textContent = text || "";
+        return;
+    }
+    const tip = document.getElementById("destPathTip");
+    if (tip) tip.textContent = text || "";
+}
+
+function openServerDirEditor() {
+    const modal = document.getElementById("serverDirModal");
+    const input = document.getElementById("serverDirInput");
+    const hint = document.getElementById("serverDirHint");
+    if (!modal || !input) return;
+    input.value = (window.serverConfig && window.serverConfig.server_dir) || "";
+    if (hint) hint.textContent = "";
+    modal.classList.add("active");
+    setTimeout(() => { try { input.focus(); input.select(); } catch (e) {} }, 50);
+}
+
+function closeServerDirEditor() {
+    const modal = document.getElementById("serverDirModal");
+    if (modal) modal.classList.remove("active");
+}
+
+// targetDir 省略时读输入框（「保存」按钮走这条），传值时为「恢复默认」
+async function saveServerDir(targetDir) {
+    const input = document.getElementById("serverDirInput");
+    const hint = document.getElementById("serverDirHint");
+    const saveBtn = document.getElementById("serverDirSaveBtn");
+    const dir = (targetDir !== undefined ? targetDir : (input ? input.value : "")).trim();
+    if (!dir) {
+        if (hint) hint.textContent = "请填写目录";
+        return;
+    }
+    if (saveBtn) saveBtn.disabled = true;
+    if (hint) hint.textContent = "正在保存…";
+    try {
+        const resp = await fetch("/api/server/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ download_dir: dir }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `保存失败 (${resp.status})`);
+
+        window.serverConfig = Object.assign({}, window.serverConfig || {}, data);
+        setDestPathLabel(data.download_dir || dir);
+        setDownloadDestination(window.downloadDestination);   // 按最新配置重渲染路径提示
+        closeServerDirEditor();
+        if (data.warning) showToast(data.warning, "error");
+        else showToast("归档目录已更新（只影响后续任务）", "success");
+    } catch (e) {
+        if (hint) hint.textContent = e.message || "保存失败";
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+// 「恢复默认」= 回到环境变量给的目录（compose 里的 DOWNLOAD_DIR）
+function resetServerDir() {
+    const def = window.serverConfig && window.serverConfig.default_server_dir;
+    const hint = document.getElementById("serverDirHint");
+    if (!def) {
+        if (hint) hint.textContent = "没有可用的默认目录，请手动填写";
+        return;
+    }
+    saveServerDir(def);
+}
+
+// 归档目录弹窗的交互绑定。放在这里自成一块，避免改动文件顶部那一大段
+// 弹窗绑定区（那里牵涉多个既有弹窗，动它容易误伤）。
+(function bindServerDirModal() {
+    const modal = document.getElementById("serverDirModal");
+    if (!modal) return;
+    const closeBtn = document.getElementById("closeServerDirBtn");
+    const saveBtn = document.getElementById("serverDirSaveBtn");
+    const resetBtn = document.getElementById("serverDirResetBtn");
+    const input = document.getElementById("serverDirInput");
+    if (closeBtn) closeBtn.addEventListener("click", closeServerDirEditor);
+    if (saveBtn) saveBtn.addEventListener("click", () => saveServerDir());
+    if (resetBtn) resetBtn.addEventListener("click", resetServerDir);
+    if (input) {
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); saveServerDir(); }
+        });
+    }
+    // 与其他弹窗一致：点遮罩空白处关闭
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeServerDirEditor(); });
+})();
 
 // ==========================================================================
 // 桌面客户端：原生保存位置（选择目录 / 打开目录 / 持久化）
@@ -1370,7 +1476,7 @@ async function initServerArchiving() {
             window.isDesktop = !!cfg.is_desktop;
             const tipEl = document.getElementById("destPathTip");
             if (tipEl && cfg.download_dir) {
-                tipEl.textContent = cfg.download_dir;
+                setDestPathLabel(cfg.download_dir);
             }
             if (cfg.is_desktop) {
                 applyDesktopMode();
@@ -3587,6 +3693,13 @@ function saveImageFromPreview() {
 
 document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    // 最上层优先：改归档目录的弹窗是带输入框的模态，Esc 先关它
+    // （只有它自己开着时才处理，否则照旧往下走，不影响预览与抽屉）
+    const dirModal = document.getElementById("serverDirModal");
+    if (dirModal && dirModal.classList.contains("active")) {
+        closeServerDirEditor();
+        return;
+    }
     // 优先级按"谁在最上层"来：图片预览是全屏遮罩，先关它；它没开才轮到任务抽屉。
     // Esc 关闭是桌面应用的硬惯例，而这个抽屉此前完全不响应 Esc
     //（Esc 只关图片预览），用户只能去点右上角的收起箭头。

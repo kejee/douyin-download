@@ -14,3 +14,11 @@ venv/
 !README.md
 .DS_Store
 downloads/
+
+# 下面这些不进镜像（Dockerfile 是显式 COPY，本文件只用于缩小构建上下文）
+dist/
+backup/
+.workbuddy/
+assets/
+scripts/
+docker-compose*.yml

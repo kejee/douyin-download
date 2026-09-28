@@ -1,27 +1,42 @@
+# Universal Downloader · 通用 Compose（Docker Desktop / 群晖 / Linux 主机）
+#
+# 威联通（QNAP）用户请改用 docker-compose.qnap.yml —— 那边必须写绝对路径。
+#
+# 开发时想「改完代码直接生效」，再额外挂上源码目录：
+#     - .:/app
+# 但发布给用户时**不要**加这条：它会把镜像里的代码整个盖掉，
+# 而且用户手里没有源码，容器会直接起不来。
 services:
-  douyin-downloader:
+  universal-downloader:
     build:
       context: .
       dockerfile: Dockerfile
-    image: douyin-downloader:latest
-    container_name: douyin-downloader
+    image: universal-downloader:latest
+    container_name: universal-downloader
     restart: unless-stopped
     ports:
+      # 左边是宿主机端口，冲突时改它（右边 8000 是容器内端口，不要动）
       - "8000:8000"
     volumes:
-      - .:/app
-      # NAS / 服务端视频归档存储路径 (可挂载宿主机或 NAS 共享目录)
+      # 【必须挂载】settings.json / history.json / 预览缓存都在这里。
+      # 不挂的话，换个镜像版本历史记录与设置就全丢了。
+      - ./config:/config
+      # 【必须挂载】下载归档目录，也可以指向宿主机上任意位置。
       - ./downloads:/downloads
     environment:
       - TZ=Asia/Shanghai
-      - DOWNLOAD_DIR=/downloads
-      # 可选：配置 B 站普通账号/大会员的 SESSDATA 或完整 Cookie，即可解锁 1080P/4K 画质解析
+      # 挂载卷里新建文件的属主。设成**你自己的** uid/gid，否则文件在
+      # 文件管理器里删不掉：Linux 用 `id -u` / `id -g` 查。
+      - PUID=1000
+      - PGID=1000
+      # 可选：B站 SESSDATA，用于解锁 1080P/4K（用你自己的账号）
       # - SESSDATA=your_sessdata_here
-      # - BILIBILI_COOKIE=SESSDATA=xxx; buvid3=xxx
-      # - HTTP_PROXY=http://127.0.0.1:7890
-      # - HTTPS_PROXY=http://127.0.0.1:7890
+      # 可选：解析 YouTube / Twitter 需要代理
+      # - HTTP_PROXY=http://192.168.1.2:7890
+      # - HTTPS_PROXY=http://192.168.1.2:7890
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 15s

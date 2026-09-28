@@ -2910,6 +2910,37 @@ body {
     white-space: nowrap;
 }
 
+/* 可编辑的归档路径标签（只在 NAS/服务端模式出现）：点一下就能改目录，
+   不必改 compose 再重建容器。它是个 <button>，要显式清掉浏览器默认的
+   字体与对齐，否则和旁边的小标签不是一套字。 */
+.dest-path-tip.is-editable {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 240px;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: all 0.18s ease;
+}
+.dest-path-tip.is-editable:hover {
+    color: #c7d2fe;
+    border-color: rgba(99, 102, 241, 0.65);
+    background: rgba(99, 102, 241, 0.25);
+}
+.dest-path-tip.is-editable i {
+    font-size: 9.5px;
+    opacity: 0.75;
+    flex-shrink: 0;
+}
+/* 省略号要落在内部的文本节点上：flex 容器自身的 text-overflow 不生效 */
+.dest-path-tip.is-editable #destPathText {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .task-manager-title {
     font-size: 13.5px;
     font-weight: 700;

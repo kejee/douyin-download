@@ -5,4 +5,8 @@ pydantic>=2.0.0,<3.0.0
 yt-dlp>=2024.0.0
 jinja2>=3.1.2,<4.0.0
 python-multipart>=0.0.6,<1.0.0
-pywebview>=5.0.0
+
+# 注意：pywebview 不在这里，它在 requirements-desktop.txt。
+# 它是**桌面客户端**（PyInstaller 打包）才需要的 GUI 依赖；Web/服务端与
+# Docker 镜像都不需要它 —— 放在这里会连带装进一整套 GUI 运行时。
+# 本文件 = 「跑 Web 服务 / Docker 镜像」所需的最小集合。

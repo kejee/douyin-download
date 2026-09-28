@@ -17,7 +17,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.5.7.0"
+APP_VERSION = "2.5.8.0"
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +302,31 @@ def _batch_meta(items: List[ServerDownloadItem]) -> tuple:
 async def get_server_config():
     """获取服务端/NAS 存储配置"""
     return server_downloader.get_config()
+
+class ServerDirRequest(BaseModel):
+    download_dir: str
+
+@app.post("/api/server/config")
+async def set_server_config(req: ServerDirRequest):
+    """设置 NAS/服务端归档目录（持久化，立即对**后续**任务生效）
+
+    存在的意义：NAS 用户换个存储位置原本要改 compose 再重建容器，
+    而容器一重建就丢正在排队的任务。改成界面上可改后，换目录不动容器。
+
+    注意只影响后续任务 —— 在途任务的目标路径在入队时就算好了，改不了。
+    失败时把具体原因回给前端（不存在 / 不可写 / 非绝对路径），
+    因为这些报错用户在容器里看不到。
+    """
+    ok, message, persistent = server_downloader.set_server_dir(req.download_dir)
+    if not ok:
+        raise HTTPException(status_code=400, detail=message)
+    config = server_downloader.get_config()
+    return {
+        "success": True,
+        "persistent": persistent,
+        "warning": "" if persistent else "该路径不在挂载卷上，容器重建后已下载的文件会丢失",
+        **config,
+    }
 
 @app.post("/api/server/download")
 async def create_server_downloads(req: ServerBatchDownloadRequest):

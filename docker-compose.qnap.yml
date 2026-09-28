@@ -20,13 +20,41 @@
 # 如果 `ls -l /share | grep <共享文件夹名>` 能看到软链，
 # 就用 /share/<共享文件夹名>/... 代替 /share/CACHEDEVn_DATA/<共享文件夹名>/...，
 # 这样存储池编号变了也不用改。
+#
+# ══════════════════════════════════════════════════════════════════
+#  三条部署路线，按你的情况选一条（选路线 A 或 B 时记得删掉 build: 两行）
+# ══════════════════════════════════════════════════════════════════
+#
+# 路线 A｜拉预构建镜像（最省事，NAS 上不用装任何构建环境）
+#     image: ghcr.io/<你的用户名>/douyin-download:latest
+#     并**删掉**下面的 build: 两行。
+#     仓库的 GitHub Actions 会推 amd64 + arm64 多架构镜像。
+#
+# 路线 B｜在 Apple 芯片 Mac 上交叉构建 → 导出 tar → NAS 导入
+#     （**Intel 架构的 NAS 推荐这条**，实测有效，见下方 platform 说明）
+#     Mac 上执行：
+#         docker compose build          # 本文件已写死 platform: linux/amd64
+#         docker save -o universal-downloader-amd64.tar universal-downloader:latest
+#     NAS 上执行：
+#         Container Station → 镜像 → 导入（选那个 tar）
+#         或 SSH：docker load -i /share/Webs/universal-downloader-amd64.tar
+#     ⚠️ 导入镜像这条路**必须删掉下面的 build: 两行、只留 image:** ——
+#        否则 compose 会尝试在 NAS 上就地重新构建，而 NAS 上没有源码 → 直接报错。
+#
+# 路线 C｜在 NAS 上就地构建（需要把整个源码放到 NAS 上，且 NAS 装了构建环境）
+#     就是本文件的原样，`docker compose build` 即可。Intel 型号原生构建，最慢但不折腾。
+#
 services:
   universal-downloader:
-    # 路线 A（推荐）：直接拉预构建的多架构镜像，NAS 上不用装构建环境。
-    #   仓库已有 GitHub Actions 在推 amd64+arm64 的镜像；把下面两行换成：
-    #     image: ghcr.io/kejee/douyin-download:latest
-    #   并**删掉** build: 那两行。
-    # 路线 B：在 Container Station 里就地构建（需要 build context 里的源码）。
+    # ⚠️ 这一行是给**在 Apple 芯片 Mac 上构建**准备的，别删（除非你的 NAS 是 arm64）。
+    #    M 系列 Mac 上不指定平台会构建出 arm64 镜像，导到 Intel NAS 上
+    #    容器会以 `exec format error` 起不来；不加 --platform 的 docker save
+    #    导出的就是那枚 arm64 镜像。
+    #    反过来说：**如果你的 NAS 是 ARM 型号（如 TS-233 / TS-133），
+    #    把 amd64 改成 arm64，或直接删掉这一行。**
+    #    在 Intel NAS 上这一行等于没写，留着完全无害。
+    platform: linux/amd64
+
     build:
       context: .
       dockerfile: Dockerfile

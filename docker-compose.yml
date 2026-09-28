@@ -6,8 +6,21 @@
 #     - .:/app
 # 但发布给用户时**不要**加这条：它会把镜像里的代码整个盖掉，
 # 而且用户手里没有源码，容器会直接起不来。
+#
+# ── 在 Apple 芯片（M1/M2/M3/M4）Mac 上构建时的重要提醒 ──────────────
+# 不指定平台会构建出 **arm64** 镜像。如果目标是 Intel(x86_64) 的 NAS/服务器，
+# 容器会以 `exec format error` 起不来，或在导入时提示 no matching manifest。
+# 两种解法（选一个）：
+#     ① 命令行：docker build --platform linux/amd64 -t universal-downloader:latest .
+#     ② 取消下面 platform 那行的注释，然后 docker compose build
+# 构建完务必核对：docker image inspect universal-downloader:latest \
+#                     --format '{{.Os}}/{{.Architecture}}'      # 要看到 linux/amd64
 services:
   universal-downloader:
+    # 目标是 Intel/amd64 机器时才打开；目标是 arm64（树莓派、ARM 型号 NAS）
+    # 就改成 linux/arm64 或保持注释。本机自用时这一行可留注释。
+    # platform: linux/amd64
+
     build:
       context: .
       dockerfile: Dockerfile

@@ -1734,6 +1734,8 @@ function applyServerTask(data, allowCreate = true) {
             if (data.status !== "running") localTask.pendingPause = false;
         }
         localTask.progress = data.progress;
+        // 排队原因（"preempted" = 为其他设备让位后在排队续传）
+        localTask.queuedReason = data.queued_reason || '';
         // 体积进度（后端逐块统计，用来判断"是不是卡住了"）
         if (typeof data.total_bytes === "number") {
             localTask.totalBytes = data.total_bytes;
@@ -1760,6 +1762,7 @@ function applyServerTask(data, allowCreate = true) {
         savePath: data.save_path || '',
         totalBytes: data.total_bytes,
         downloadedBytes: data.downloaded_bytes,
+        queuedReason: data.queued_reason || '',
         finishedAt: ['success', 'error', 'canceled'].includes(data.status) ? Date.now() / 1000 : 0,
         isServerTask: true,
     });
@@ -2098,7 +2101,7 @@ function _tmSignature() {
     // 否则任务从活跃区转移到历史区（或历史被清空）时不会重建 DOM，
     // 界面会停在上一次的结构上（历史上踩过的整表重建坑的反面）。
     const queuePart = window.taskQueue
-        .map(t => [t.id, t.status, t.title, t.filename || '', t.savePath || ''].join('|'))
+        .map(t => [t.id, t.status, t.title, t.filename || '', t.savePath || '', t.queuedReason || ''].join('|'))
         .join('\n');
     // 历史部分的签名由 renderTaskManagerUI 算好缓存（它已经遍历过一遍历史，
     // 而这里的调用频率是"每个进度数据块一次"，不能重复遍历最多 500 条历史）
@@ -2382,6 +2385,11 @@ function renderTaskCard(t, isHistory) {
     let statusLabel = "等待中";
     let statusClass = "status-waiting";
     if (t.status === "running") { statusLabel = `下载中 ${t.progress}%`; statusClass = "status-running"; }
+    else if (t.status === "waiting" && t.queuedReason === 'preempted') {
+        // 为其他设备让位后重新排队：这不是用户暂停，槽位一空出来就会自己续上。
+        // 文案必须和「已暂停」区分开，否则用户会以为自己得点一下才能继续。
+        statusLabel = "已让位 · 排队续传"; statusClass = "status-waiting";
+    }
     else if (t.status === "paused") { statusLabel = "已暂停"; statusClass = "status-paused"; }
     else if (t.status === "success") { statusLabel = "已完成"; statusClass = "status-success"; }
     else if (t.status === "error") { statusLabel = "失败"; statusClass = "status-error"; }
@@ -2418,7 +2426,7 @@ function renderTaskCard(t, isHistory) {
                         <button class="btn-task-action" data-task-action="pause" data-task-id="${t.id}" title="暂停此任务">
                             <i class="fa-solid fa-pause"></i>
                         </button>` : ''}
-                        ${t.status === 'paused' || t.status === 'waiting' ? `
+                        ${t.status === 'paused' || (t.status === 'waiting' && t.queuedReason !== 'preempted') ? `
                         <button class="btn-task-action" data-task-action="resume" data-task-id="${t.id}" title="开始/继续此任务">
                             <i class="fa-solid fa-play"></i>
                         </button>` : ''}

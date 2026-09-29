@@ -77,6 +77,15 @@ class ServerTask(BaseModel):
     # B 能看到 A 正在下的卡片，而且卡片上的暂停/取消按钮能直接操作 A 的任务。
     # 为空 = 无标识客户端（老前端 / curl），此时不做隔离。
     owner: str = ""
+    # 让位（抢占）用到的三个字段。
+    #
+    # 背景：并发槽位是全局共享的，先提交的一方会把池子占满。新设备一提交就**只能排队**，
+    # 排在对方一整批任务后面 —— 于是需要"请对方让一个槽位出来"。
+    # 但只有**能无损续传**的任务才允许被让位，见 _try_preempt_locked。
+    resumable: bool = False     # 当前源支持断点续传（Accept-Ranges: bytes 或 206）
+    preempted: bool = False     # 本次中断是"让位"而非用户手动暂停 → 中断后自动重新排队
+    preempted_at: float = 0.0   # 上次被让位的时间（冷却用，避免同一任务被反复打断）
+    queued_reason: str = ""     # 排队原因："" | "preempted"。前端据此显示「已让位 · 排队续传」
     platform: str = "media"  # 来源平台（bilibili / douyin / xhs ...），历史记录里要展示
     # 批次信息：同一次批量提交（合集 / 多选）的任务共享 batch_id，
     # 历史记录里折叠成一行，淘汰时也只占一个"组"名额。《单条提交为空》
@@ -99,6 +108,15 @@ class ServerDownloadManager:
     # 多试几次（可从断点续传），把换源留给真正的源端故障。
     TRACK_RETRIES = 3
     RETRY_BACKOFF = (1.0, 2.5)
+
+    # --- 设备公平：每台设备至少能分到 MIN_SHARE_PER_DEVICE 个槽位 ---
+    #
+    # 全局槽位池会被先提交的一方占满，后到的设备只能干等。下面这组参数让后到的设备
+    # "请对方让一个出来"，从而**立即开始**，而不是排在一整批任务后面。
+    MIN_SHARE_PER_DEVICE = 1    # 每台设备保底槽位数（也是"要不要抢"的判据）
+    PREEMPT_COOLDOWN = 60.0     # 让位冷却：一个窗口内最多让位一次，防止把对方反复打断
+    SLOT_WAIT_TICK = 5.0        # 排队等待的回头间隔（重试让位 / 清理过期预留）
+    SLOT_RESERVE_TTL = 15.0     # 让位腾出的槽位为发起者保留多久（防它被取消后全员饿死）
 
     def __init__(self, download_dir: str = DOWNLOAD_DIR, max_concurrent: Optional[int] = None):
         # 归档根目录：**用户在 Web 上改过的值优先**，否则用环境变量给的默认值。
@@ -123,6 +141,14 @@ class ServerDownloadManager:
         # 改上限时唤醒等待者重新判断即可。
         self._active_slots = 0
         self._gate = asyncio.Condition()
+        # 每台设备当前占着几个槽位（owner 为空 = 无标识客户端，也自成一份计数，
+        # 否则"某台设备占满了池子"的判断会漏掉它）
+        self._active_by_owner: Dict[str, int] = {}
+        # 让位腾出来的槽位**定向预留**给发起者：不预留的话，被让位方自己的排队任务
+        # （或另一个等待者）会先抢到这个刚空出的槽位，让位白做一场。
+        self._slot_reserved_for = ""
+        self._slot_reserved_until = 0.0
+        self._preempt_cooldown_until = 0.0
         # 正在被某个协程执行的 task.id（防止同一任务被并发下两次）
         self._running_ids: set = set()
         # 已派发协程（含还在排队等槽位的）的 task.id（防止同一任务被重复调度）
@@ -483,7 +509,7 @@ class ServerDownloadManager:
         acquired = False
         claimed = False
         try:
-            acquired = await self._acquire_slot()
+            acquired = await self._acquire_slot(task)
             if not acquired:
                 return
 
@@ -500,6 +526,8 @@ class ServerDownloadManager:
 
             task.status = "running"
             task.progress = 5
+            # 拿到槽位真正开跑：清掉"排队原因"（此前可能是"已让位·排队续传"）
+            task.queued_reason = ""
             logger.info(
                 f"[{task.id}] 开始下载 | {task.filename} | 来源="
                 f"{'作品链接' if (task.url and not task.direct_url) else '直链'}"
@@ -554,6 +582,21 @@ class ServerDownloadManager:
                     # 历史记录统一在 cancel_task 里写：那里是"用户取消"的唯一权威入口，
                     # 且能覆盖"任务还在排队（waiting）就被取消"这种没有协程在跑的情况。
                     self._notify_listeners("task_canceled", task.dict())
+                elif task.preempted:
+                    # 让位给别的设备：**保留分片**，自动重新排队等空槽。
+                    # 这里刻意不置成 paused —— 那会让用户以为要手动点「继续」，
+                    # 而"让位"应当是对方跑完、槽位空出来就自己续上。
+                    task.preempted = False
+                    task.status = "waiting"
+                    logger.info(
+                        f"[{task.id}] 已让位，重新排队 | {task.filename} | "
+                        f"保留 {_fmt_size(task.downloaded_bytes)}，等空槽自动续传"
+                    )
+                    self._notify_listeners("task_requeued", task.dict())
+                    # 由本协程自己重新入队：它在退出前排队，等槽位空出即续传。
+                    # 调度标记的清理发生在下面的 finally（同步执行），一定早于新协程跑起来，
+                    # 所以这里 create_task 不会与 _scheduled 的清理打架。
+                    asyncio.create_task(self._process_single_task(task))
                 else:
                     # 暂停：**保留分片**，继续时从断点续传
                     task.status = "paused"
@@ -579,24 +622,136 @@ class ServerDownloadManager:
                 self._running_ids.discard(task.id)
             self._scheduled.discard(task.id)
             if acquired:
-                await self._release_slot()
+                await self._release_slot(task)
 
-    async def _acquire_slot(self) -> bool:
+    def _bump_owner_slots(self, owner: str, delta: int) -> None:
+        """按设备维护活跃槽位数。**调用方必须已持有 self._gate**"""
+        key = owner or ""
+        count = self._active_by_owner.get(key, 0) + delta
+        if count > 0:
+            self._active_by_owner[key] = count
+        else:
+            self._active_by_owner.pop(key, None)
+
+    def _claim_allowed_locked(self, task: "ServerTask") -> bool:
+        """当前任务能不能拿这个空槽位（可能被"预留"挡住）。持锁调用。"""
+        if not self._slot_reserved_for:
+            return True
+        if self._slot_reserved_for == task.id:
+            return True
+        # 预留过期，或发起者已经不在任务表里（被清掉/取消）→ 释放预留，
+        # 否则所有人会一起空等到有效期结束
+        if time.time() >= self._slot_reserved_until or self._slot_reserved_for not in self.tasks:
+            self._slot_reserved_for = ""
+            return True
+        return False
+
+    def _try_preempt_locked(self, task: "ServerTask") -> bool:
+        """池子满了、而本设备一个槽位都没有时，请别的设备让一个出来。持锁调用。
+
+        返回 True 表示已发起让位（调用方继续等槽位），False 表示没有可让位的任务。
+
+        只挑**能无损续传**的任务让位：源支持 Range 且已经有下载进度。找不到就不抢 ——
+        把一个不支持断点续传的任务从 0 重下，比让新设备多等一会儿糟得多。
+        """
+        owner = task.owner or ""
+        if not owner:
+            return False        # 无标识客户端（curl/老前端）不参与：无从判断"是不是另一台设备"
+        if self._active_by_owner.get(owner, 0) >= self.MIN_SHARE_PER_DEVICE:
+            return False        # 本设备已有份额，不抢
+        if time.time() < self._preempt_cooldown_until:
+            return False        # 冷却窗口内已经让过一次，别把对方反复打断
+
+        now = time.time()
+        victim: Optional[ServerTask] = None
+        for cand in self.tasks.values():
+            if cand.id == task.id or cand.status != "running":
+                continue
+            if cand.id not in self._running_ids:
+                continue        # 只让"真的有协程在跑"的，避免动到刚好在收尾的任务
+            if not cand.owner:
+                continue        # 无标识客户端的任务不抢，否则它会一直被抢而饿死
+            if cand.downloaded_bytes > 0 and not cand.resumable:
+                continue        # 已下到东西、而源不支持续传：抢它等于让它从头下，代价太大
+                                # （反过来，还没写盘的候选被抢是**零损失**，最该让它先让）
+            if now - cand.preempted_at < self.PREEMPT_COOLDOWN:
+                continue        # 这个任务刚被让位过，别连着抢它
+            if self._active_by_owner.get(cand.owner, 0) <= self.MIN_SHARE_PER_DEVICE:
+                continue        # 抢了会让对方低于保底
+            # 让位代价最小的优先：被让位时间最早、其次开始时间最早（进度通常最少）
+            if victim is None or (cand.preempted_at, cand.created_at) < (victim.preempted_at, victim.created_at):
+                victim = cand
+
+        if victim is None:
+            return False
+
+        victim.preempted = True
+        victim.preempted_at = now
+        victim.queued_reason = "preempted"
+        # 让位 = 置为 paused 触发流循环中断（保留分片，不删临时文件）；
+        # 中断分支看到 preempted=True 会把它重新排队自动续传，而不是停在"已暂停"
+        victim.status = "paused"
+        self._preempt_cooldown_until = now + self.PREEMPT_COOLDOWN
+        self._slot_reserved_for = task.id
+        self._slot_reserved_until = now + self.SLOT_RESERVE_TTL
+        logger.info(
+            f"[{victim.id}] 为设备 {owner[:8]} 让出槽位 | 保留已下载 "
+            f"{_fmt_size(victim.downloaded_bytes)}，稍后自动续传 → 让给 [{task.id}] {task.filename}"
+        )
+        self._notify_listeners("task_preempted", victim.dict())
+        return True
+
+    async def _acquire_slot(self, task: "ServerTask") -> bool:
         """占用一个下载槽位（超过同时下载数则排队等待）。
+
+        排队期间会周期性尝试"让位"：本设备一个槽位都没拿到、而别的设备占满了池子时，
+        请它让一个出来（只挑能无损续传的任务）。这样新设备一提交就能开始，
+        而不是排在那台设备一整批任务的后面。
 
         返回 False 表示任务在排队期间被取消/暂停，无需再执行。
         """
-        async with self._gate:
-            while self._active_slots >= self.max_concurrent:
-                await self._gate.wait()
-            self._active_slots += 1
-        return True
+        while True:
+            async with self._gate:
+                if self._active_slots < self.max_concurrent and self._claim_allowed_locked(task):
+                    self._active_slots += 1
+                    self._bump_owner_slots(task.owner, +1)
+                    self._slot_reserved_for = ""
+                    return True
+                if self._active_slots >= self.max_concurrent:
+                    self._try_preempt_locked(task)
+                # 短超时而不是死等：让位后对方可能因网络卡住迟迟不释放槽位，
+                # 预留也可能因发起者被取消而过期 —— 都需要周期性回头看一眼。
+                try:
+                    await asyncio.wait_for(self._gate.wait(), timeout=self.SLOT_WAIT_TICK)
+                except asyncio.TimeoutError:
+                    pass
 
-    async def _release_slot(self) -> None:
+    async def _release_slot(self, task: "ServerTask") -> None:
         async with self._gate:
             if self._active_slots > 0:
                 self._active_slots -= 1
+            self._bump_owner_slots(task.owner, -1)
             self._gate.notify_all()
+
+    async def _notify_gate(self) -> None:
+        """唤醒所有等待者（给同步方法用的间接入口）"""
+        async with self._gate:
+            self._gate.notify_all()
+
+    def _release_reserve_for(self, task_id: str) -> None:
+        """预留的持有者已经不可能来拿（被取消/暂停）时立刻释放预留。
+
+        否则其他等待者要空等到 SLOT_RESERVE_TTL 结束才能拿到那个空槽 ——
+        表现为"取消了一个任务，整个队列卡了十几秒"。
+        """
+        if self._slot_reserved_for != task_id:
+            return
+        self._slot_reserved_for = ""
+        try:
+            # 同步方法里不能 await 条件变量，交给事件循环去唤醒等待者
+            asyncio.create_task(self._notify_gate())
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _discard_partial(dest_path: str) -> None:
@@ -768,6 +923,11 @@ class ServerDownloadManager:
                     raise _SourceRejected(f"HTTP {resp.status_code}")
 
                 appending = resume_offset > 0 and resp.status_code == 206
+                # 让位的可行性判据：只有支持断点续传的源才允许被抢占。
+                # 抢一个不支持续传的任务 = 让它从 0 重下（日志里那条"该源不支持断点续传"）。
+                accept_ranges = (resp.headers.get("accept-ranges", "") or "").strip().lower()
+                if appending or accept_ranges == "bytes":
+                    task.resumable = True
                 if resume_offset > 0 and not appending:
                     logger.warning(
                         f"[{task.id}] 该源不支持断点续传（HTTP {resp.status_code}），"
@@ -879,10 +1039,21 @@ class ServerDownloadManager:
         return (not task.owner) or task.owner == owner
 
     def list_tasks(self, owner: Optional[str] = None) -> List[ServerTask]:
-        """按归属列出任务（owner 为空 = 不隔离，返回全部）"""
+        """按归属列出任务。
+
+        无标识调用者（curl / 老前端）看全部 —— 升级后端不能让旧前端"什么都看不到"。
+        有标识时**严格匹配归属**：
+
+        任务里的 owner 为空表示"某个无标识客户端建出来的、还活着的任务"，
+        不该出现在所有人的界面上（每个设备都看到一张可暂停/取消的卡片）。
+        注意与**历史**的差别：历史里 owner 为空是升级前的存量数据、不可能再归属，
+        那边对所有设备可见是必要的兼容；任务没有这个历史包袱，所以取严格语义。
+        这也是为什么这里不复用 _may_operate —— 那是动作接口的宽松闸门，
+        宽松是刻意的（避免出现谁都动不了的死任务），但不能拿来当列表过滤器。
+        """
         if not owner:
             return list(self.tasks.values())
-        return [t for t in self.tasks.values() if self._may_operate(t, owner)]
+        return [t for t in self.tasks.values() if t.owner == owner]
 
     def pause_task(self, task_id: str, owner: Optional[str] = None) -> bool:
         """暂停任务。只对进行中的任务生效。
@@ -897,6 +1068,7 @@ class ServerDownloadManager:
             if task.status not in ("waiting", "running"):
                 return False
             task.status = "paused"
+            self._release_reserve_for(task_id)
             self._notify_listeners("task_paused", task.dict())
             return True
         return False
@@ -908,6 +1080,7 @@ class ServerDownloadManager:
                 return False
             if task.status in ["paused", "error"]:
                 task.status = "waiting"
+                task.queued_reason = ""   # 手动继续：不再是"让位排队"语义
                 self._notify_listeners("task_resumed", task.dict())
                 asyncio.create_task(self._process_single_task(task))
                 return True
@@ -923,6 +1096,9 @@ class ServerDownloadManager:
             if task.status not in ("waiting", "running", "paused"):
                 return False
             task.status = "canceled"
+            # 取消的如果正好是"被预留槽位"的那个发起者，预留必须立刻释放，
+            # 否则其他等待者要一直空等到有效期结束（15s）才能拿到这个空槽
+            self._release_reserve_for(task_id)
             # 用户取消是唯一权威入口，历史在这里写：能覆盖"还在排队就被取消"
             # （此时没有任何协程在跑，CancelledError 分支根本不会执行）
             self._record_history(task)

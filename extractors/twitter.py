@@ -2,6 +2,8 @@ import re
 import os
 import json
 import asyncio
+import logging
+import tempfile
 from typing import Dict, Any, List, Optional
 import httpx
 from .base import (
@@ -12,6 +14,8 @@ from .base import (
     MediaResponse,
     QualityOption,
 )
+
+logger = logging.getLogger(__name__)
 
 TWITTER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -353,36 +357,71 @@ class TwitterExtractor(BaseExtractor):
         auth_token: Optional[str] = None,
         ct0: Optional[str] = None,
     ) -> Optional[MediaResponse]:
-        """通过 yt-dlp 引擎提取（支持 Cookie/Token 鉴权）"""
+        """通过 yt-dlp 引擎提取（支持 Netscape Cookie 鉴权与详细错误探测）"""
+        temp_cookie_path = None
         cmd = [
             "yt-dlp",
             "-j",
             "--no-warnings",
             "--no-check-certificates",
-            "--socket-timeout", "15",
+            "--socket-timeout", "20",
         ]
 
-        if auth_token:
-            cookie_parts = [f"auth_token={auth_token}"]
-            if ct0:
-                cookie_parts.append(f"ct0={ct0}")
-                cmd.extend(["--add-header", f"x-csrf-token:{ct0}"])
-            cmd.extend(["--add-header", f"Cookie:{'; '.join(cookie_parts)}"])
+        try:
+            if auth_token:
+                cookie_lines = [
+                    "# Netscape HTTP Cookie File",
+                    f".twitter.com\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}",
+                    f".x.com\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}",
+                ]
+                if ct0:
+                    cookie_lines.append(f".twitter.com\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
+                    cookie_lines.append(f".x.com\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
 
-        cmd.append(url)
+                fd, temp_cookie_path = tempfile.mkstemp(prefix="tw_cookie_", suffix=".txt")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write("\n".join(cookie_lines) + "\n")
 
-        if self.proxy:
-            cmd.extend(["--proxy", self.proxy])
+                cmd.extend(["--cookies", temp_cookie_path])
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
+            cmd.append(url)
 
-        if process.returncode != 0 or not stdout:
-            return None
+            if self.proxy:
+                cmd.extend(["--proxy", self.proxy])
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            err_text = (stderr.decode("utf-8", errors="ignore") if stderr else "").strip()
+
+            if process.returncode != 0 or not stdout:
+                if err_text:
+                    logger.warning(f"[{tweet_id}] yt-dlp Twitter 提取日志: {err_text}")
+                    # 匹配精准错误原因
+                    if "Private tweet" in err_text or "protected" in err_text.lower():
+                        raise ValueError("该推文为私密推文（锁推），需要推主互关/授权方可查看")
+                    if "age-restricted" in err_text.lower() or "nsfw" in err_text.lower():
+                        raise ValueError("该推文含成人/敏感内容，您的 Twitter 账号设置中需开启「允许显示敏感内容」")
+                    if "rate limit" in err_text.lower():
+                        raise ValueError("Twitter 接口访问受限 (Rate Limit)，请稍候再试")
+                    if "login" in err_text.lower() or "unauthorized" in err_text.lower():
+                        raise ValueError("Twitter 提示凭证已过期或无效，请重新登录 x.com 复制最新的 auth_token")
+                    
+                    # 提取 ERROR 行反馈给用户
+                    first_err = [line for line in err_text.splitlines() if "ERROR:" in line]
+                    if first_err:
+                        clean_err = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?", "", first_err[0])
+                        raise ValueError(f"Twitter 提取失败: {clean_err}")
+                return None
+        finally:
+            if temp_cookie_path and os.path.exists(temp_cookie_path):
+                try:
+                    os.remove(temp_cookie_path)
+                except Exception:
+                    pass
 
         data = json.loads(stdout.decode('utf-8'))
         title = data.get("title") or data.get("description") or "Twitter 视频"

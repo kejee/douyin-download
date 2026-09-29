@@ -369,20 +369,23 @@ class TwitterExtractor(BaseExtractor):
 
         try:
             if auth_token:
-                cookie_lines = [
-                    "# Netscape HTTP Cookie File",
-                    f".twitter.com\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}",
-                    f".x.com\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}",
-                ]
-                if ct0:
-                    cookie_lines.append(f".twitter.com\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
-                    cookie_lines.append(f".x.com\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
+                domains = [".twitter.com", ".x.com", "api.twitter.com", "api.x.com", "twitter.com", "x.com"]
+                cookie_lines = ["# Netscape HTTP Cookie File"]
+                for dom in domains:
+                    cookie_lines.append(f"{dom}\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}")
+                    if ct0:
+                        cookie_lines.append(f"{dom}\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
 
                 fd, temp_cookie_path = tempfile.mkstemp(prefix="tw_cookie_", suffix=".txt")
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write("\n".join(cookie_lines) + "\n")
 
                 cmd.extend(["--cookies", temp_cookie_path])
+                if ct0:
+                    cmd.extend(["--add-header", f"x-csrf-token:{ct0}"])
+                cmd.extend(["--add-header", f"authorization:Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"])
+                cmd.extend(["--user-agent", TWITTER_UA])
+                cmd.extend(["--referer", "https://x.com/"])
 
             cmd.append(url)
 

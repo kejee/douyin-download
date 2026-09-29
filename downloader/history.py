@@ -14,13 +14,16 @@
 曾经按条淘汰（500 条上限），结果一次 500 集的合集下载就把上限打满，
 并把之前所有零散记录静默挤掉 —— 用户实测踩到过。按组淘汰后，
 一次合集只占一个组名额，零散记录不会再被批量任务淹没。
+
+**条目带 `owner`（发起下载的浏览器/设备标识）**：NAS 上全家共用一份 history.json，
+没有归属的话谁都能看到、还能互相清空。owner 为空 = 老记录或无标识客户端，不隔离。
 """
 import json
 import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from downloader.paths import app_config_dir
 
@@ -106,10 +109,44 @@ def _write_raw(entries: List[Dict[str, Any]]) -> bool:
         return False
 
 
-def load_history() -> List[Dict[str, Any]]:
-    """读取全部历史，**最近的在前**（界面直接按这个顺序渲染）"""
+def load_history(owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    """读取历史，**最近的在前**（界面直接按这个顺序渲染）
+
+    owner=None → 全部条目（没有设备标识的客户端，不隔离）
+    owner="x"  → 只返回「属于 x」的条目
+
+    归属判定刻意把 **owner 为空**的条目也算作"属于 x"：那是引入设备标识之前写下的
+    记录，无法判断原本属于谁。若把它们藏起来，用户升级后会发现自己几百条历史凭空
+    消失，比"多看到几条老记录"糟糕得多。代价是这批老记录任何设备都能清掉 ——
+    它们本来就是"共享时代"的产物。
+    """
     with _lock:
-        return list(reversed(_read_raw()))
+        entries = _read_raw()
+    if owner:
+        entries = [e for e in entries if not e.get("owner") or e.get("owner") == owner]
+    return list(reversed(entries))
+
+
+def load_history_split(owner: Optional[str]) -> tuple:
+    """一次读盘，切分成 (自己的条目, 其他设备的条目)，两个列表都「最近的在前」。
+
+    为什么要在后端切分而不是让前端自己按 owner 过滤：前端只拿到"自己的"那份时，
+    就没法告诉用户"另外还有 N 条来自其他设备" —— 而这句话恰恰是避免用户以为
+    "我的记录丢了"的关键。owner 为空（无标识客户端）时不做隔离：第二项恒为空。
+    """
+    with _lock:
+        entries = _read_raw()
+    if not owner:
+        return list(reversed(entries)), []
+    mine: List[Dict[str, Any]] = []
+    others: List[Dict[str, Any]] = []
+    for e in entries:
+        entry_owner = e.get("owner") or ""
+        if not entry_owner or entry_owner == owner:
+            mine.append(e)
+        else:
+            others.append(e)
+    return list(reversed(mine)), list(reversed(others))
 
 
 def record_history(
@@ -129,6 +166,7 @@ def record_history(
     error: str = "",
     batch_id: str = "",
     batch_title: str = "",
+    owner: str = "",
 ) -> bool:
     """追加一条历史。同一 id 已存在时先删旧再写新（重试成功的任务只留最新一条）"""
     if not task_id:
@@ -152,6 +190,10 @@ def record_history(
         # 界面上折叠成一行，淘汰时也只占一个组名额
         "batch_id": str(batch_id or ""),
         "batch_title": str(batch_title or ""),
+        # 归属：发起这次下载的浏览器/设备标识（前端 localStorage 生成，随请求带上）。
+        # 共用一台 NAS 时靠它把「历史」和「任务列表」分开，避免互相看到、互相清空。
+        # 为空 = 引入该字段之前的老记录，或没有标识的客户端（不隔离）。
+        "owner": str(owner or ""),
     }
     with _lock:
         entries = [e for e in _read_raw() if e.get("id") != task_id]
@@ -159,13 +201,24 @@ def record_history(
         return _write_raw(_trim(entries))
 
 
-def delete_history(ids: Iterable[str]) -> int:
-    """删除指定 id 的历史条目，返回实际删除条数"""
+def delete_history(ids: Iterable[str], owner: Optional[str] = None) -> int:
+    """删除指定 id 的历史条目，返回实际删除条数
+
+    owner 给定时只删「自己的」（含无归属的老记录）—— 别人的记录删不动。
+    界面上其他设备的条目本来就不渲染操作按钮，这里是纵深防御：
+    接口能被手工调用，不该因为前端没显示按钮就认为不会有请求。
+    """
     wanted = {str(i) for i in (ids or []) if i}
     if not wanted:
         return 0
     with _lock:
         entries = _read_raw()
+        if owner:
+            wanted = {
+                e.get("id") for e in entries
+                if e.get("id") in wanted
+                and (not e.get("owner") or e.get("owner") == owner)
+            }
         kept = [e for e in entries if e.get("id") not in wanted]
         removed = len(entries) - len(kept)
         if removed:
@@ -173,9 +226,19 @@ def delete_history(ids: Iterable[str]) -> int:
         return removed
 
 
-def clear_history() -> int:
-    """清空全部历史（不影响已下载的文件），返回清掉的条数"""
+def clear_history(owner: Optional[str] = None) -> int:
+    """清空历史（不影响已下载的文件），返回清掉的条数
+
+    owner 给定时只清自己的（含无归属的老记录），**别人的记录保留** ——
+    否则共用同一台 NAS 时，一个人点「清空」，全家历史一起归零。
+    """
     with _lock:
-        removed = len(_read_raw())
-        _write_raw([])
+        entries = _read_raw()
+        if owner:
+            kept = [e for e in entries if e.get("owner") and e.get("owner") != owner]
+        else:
+            kept = []
+        removed = len(entries) - len(kept)
+        if removed:
+            _write_raw(kept)
         return removed

@@ -17,7 +17,7 @@ from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
 
-APP_VERSION = "2.6.2.0"
+APP_VERSION = "2.6.3.0"
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,24 @@ async def stream_mux_download(
 from downloader import server_downloader, preview
 from downloader.server_downloader import DuplicateTaskError
 from downloader.paths import is_desktop_mode
-from downloader.history import clear_history, delete_history, load_history
+from downloader.history import (
+    clear_history,
+    delete_history,
+    load_history_split,
+)
+
+
+def _client_id(request: Request) -> str:
+    """取出请求方携带的设备标识（前端 localStorage 生成）。
+
+    两条通路：普通请求走 `X-Client-Id` 头；**SSE 只能走 query** ——
+    EventSource 不允许自定义请求头，这是浏览器 API 的硬限制。
+
+    返回空串表示"没有标识"，调用方一律按**不隔离**处理（返回全部、不做归属校验）。
+    这样 curl / 老前端仍然能正常用，不会因为升级了后端就"什么都看不到"。
+    """
+    raw = request.headers.get("X-Client-Id") or request.query_params.get("client_id") or ""
+    return raw.strip()[:64]
 
 class ServerDownloadItem(BaseModel):
     url: Optional[str] = None
@@ -329,11 +346,12 @@ async def set_server_config(req: ServerDirRequest):
     }
 
 @app.post("/api/server/download")
-async def create_server_downloads(req: ServerBatchDownloadRequest):
+async def create_server_downloads(req: ServerBatchDownloadRequest, request: Request):
     """提交一个或多个下载任务到服务端/NAS 自动归档"""
     created_tasks = []
     skipped: List[dict] = []
     batch_id, batch_title = _batch_meta(req.tasks)
+    client_id = _client_id(request)
     for item in req.tasks:
         try:
             task = server_downloader.add_task(
@@ -353,15 +371,20 @@ async def create_server_downloads(req: ServerBatchDownloadRequest):
                 audio_backup_urls=item.audio_backup_urls,
                 batch_id=batch_id,
                 batch_title=batch_title,
+                owner=client_id,
             )
             created_tasks.append(task)
         except DuplicateTaskError as exc:
-            # 同一目标路径已有活动任务：跳过而不是让它俩并发写同一个文件
+            # 同一目标路径已有活动任务：跳过而不是让它俩并发写同一个文件。
+            # 注意去重是**跨设备**的（归档目录只有一份）——所以这里的"已存在"很可能
+            # 是**别的设备**发起的任务，而它并不在本设备的任务列表里。前端要靠
+            # existing_owner 把提示说清楚，否则用户会看到"已在下载队列中"却找不到那条任务。
             skipped.append({
                 "title": item.title,
                 "filename": item.filename,
                 "reason": str(exc),
                 "existing_id": exc.existing.id,
+                "existing_owner": exc.existing.owner or "",
             })
     return {
         "success": True,
@@ -372,63 +395,81 @@ async def create_server_downloads(req: ServerBatchDownloadRequest):
     }
 
 @app.get("/api/server/tasks")
-async def list_server_tasks():
-    """获取当前服务端任务队列"""
-    return {"tasks": list(server_downloader.tasks.values())}
+async def list_server_tasks(request: Request):
+    """获取当前设备提交的服务端任务队列
+
+    按设备过滤：共用一台 NAS 时，B 不该看到 A 正在下的卡片（上面还带暂停/取消按钮）。
+    没有设备标识的调用方（curl / 老前端）照旧拿到全部。
+    """
+    return {"tasks": server_downloader.list_tasks(_client_id(request))}
 
 @app.post("/api/server/tasks/{task_id}/pause")
-async def pause_server_task(task_id: str):
-    ok = server_downloader.pause_task(task_id)
+async def pause_server_task(task_id: str, request: Request):
+    ok = server_downloader.pause_task(task_id, _client_id(request))
     return {"success": ok}
 
 @app.post("/api/server/tasks/{task_id}/resume")
-async def resume_server_task(task_id: str):
-    ok = server_downloader.resume_task(task_id)
+async def resume_server_task(task_id: str, request: Request):
+    ok = server_downloader.resume_task(task_id, _client_id(request))
     return {"success": ok}
 
 @app.post("/api/server/tasks/{task_id}/cancel")
-async def cancel_server_task(task_id: str):
-    ok = server_downloader.cancel_task(task_id)
+async def cancel_server_task(task_id: str, request: Request):
+    ok = server_downloader.cancel_task(task_id, _client_id(request))
     return {"success": ok}
 
 @app.post("/api/server/tasks/clear")
-async def clear_server_tasks():
-    count = server_downloader.clear_completed()
+async def clear_server_tasks(request: Request):
+    count = server_downloader.clear_completed(_client_id(request))
     return {"success": True, "cleared_count": count}
 
 class HistoryDeleteRequest(BaseModel):
     ids: List[str] = []
 
 @app.get("/api/history")
-async def get_download_history():
+async def get_download_history(request: Request):
     """下载历史（最近的在前）。
 
     任务进入终态时由 ServerDownloadManager 落一条，重启客户端后依然可查 ——
     这是"任务列表重启即清空"的补偿数据源。
+
+    共用一台 NAS 时按设备切分：entries 只含本设备的（以及无归属的老记录），
+    others 是其他设备的（前端默认折叠、只读），另给条数。必须把 others 的条数
+    一起告诉前端 —— 否则换台设备看不到自己的记录时，用户会以为"历史丢了"。
     """
-    entries = load_history()
-    return {"count": len(entries), "entries": entries}
+    client_id = _client_id(request)
+    entries, others = load_history_split(client_id)
+    return {
+        "count": len(entries),
+        "entries": entries,
+        "others_count": len(others),
+        # 其他设备的记录只用于"展开看看"，限条数（history.json 上限 3000 条）
+        "others": others[:50],
+    }
 
 @app.post("/api/history/clear")
-async def clear_download_history():
+async def clear_download_history(request: Request):
     """清空下载历史（只删记录，不动已下载的文件）
 
     历史区的数据来源是两条：内存里的 success/canceled 任务 + 持久化的 history.json。
     只清后者的话，前端清完 taskQueue，下次 /api/server/tasks 同步又把旧任务灌回来，
     界面上会残留「本次会话刚完成任务」，看起来像按钮没生效。所以这里两条一起清。
+
+    **只清本设备的**：共用 NAS 时一个人点「清空」，全家历史一起归零是灾难。
     """
-    tasks_cleared = server_downloader.clear_settled_tasks()
-    count = clear_history()
+    client_id = _client_id(request)
+    tasks_cleared = server_downloader.clear_settled_tasks(client_id)
+    count = clear_history(client_id)
     return {"success": True, "cleared": count, "tasks_cleared": tasks_cleared}
 
 @app.post("/api/history/delete")
-async def delete_download_history(req: HistoryDeleteRequest):
-    """按 id 删除历史记录。
+async def delete_download_history(req: HistoryDeleteRequest, request: Request):
+    """按 id 删除历史记录（只删本设备的）。
 
     用于「移除单条历史」：界面上历史与任务列表是同一块区域，
     列表里清掉的条目必须在历史里一起消失，否则会被当成"按钮没生效"。
     """
-    count = delete_history(req.ids)
+    count = delete_history(req.ids, _client_id(request))
     return {"success": True, "deleted": count}
 
 class ConcurrencyRequest(BaseModel):
@@ -569,8 +610,15 @@ def _preview_task_id(key: str) -> str:
     return f"preview_{key}"
 
 @app.post("/api/preview/prepare")
-async def prepare_preview(req: PreviewPrepareRequest):
-    """准备预览文件：命中缓存直接返回，否则后台混流并回传进度"""
+async def prepare_preview(req: PreviewPrepareRequest, request: Request):
+    """准备预览文件：命中缓存直接返回，否则后台混流并回传进度
+
+    预览也带上归属：它内部是一个 channel="preview" 的后台任务，事件走同一条 SSE。
+    不带归属的话，A 点开预览，B 的连接会收到这条任务的详情（标题、直链）——
+    界面上看不见（前端按 channel 过滤），但数据确实在网线上。
+    缓存文件本身仍然是**全设备共享**的（按直链路径做键），这是有意为之：
+    两个人预览同一个视频没必要下两遍。
+    """
     if not req.video_url:
         raise HTTPException(status_code=400, detail="缺少 video_url 参数")
 
@@ -592,6 +640,7 @@ async def prepare_preview(req: PreviewPrepareRequest):
             channel="preview",
             filename=f"{key}.mp4",
             task_id=task_id,
+            owner=_client_id(request),
         )
     except DuplicateTaskError:
         return {"success": True, "key": key, "ready": False, "progress": 0}
@@ -641,11 +690,14 @@ async def preview_stream(key: str):
     return FileResponse(path, media_type="video/mp4")
 
 @app.post("/api/local/download")
-async def create_local_downloads(req: ServerBatchDownloadRequest):
+async def create_local_downloads(req: ServerBatchDownloadRequest, request: Request):
     """提交下载任务到桌面端本地目录归档"""
     created_tasks = []
     skipped: List[dict] = []
     batch_id, batch_title = _batch_meta(req.tasks)
+    # 桌面端只有一个用户，标识在这里没有隔离价值；照样记下来是为了让历史条目
+    # 与 NAS 走同一套结构（同一个 history.json 格式、同一套过滤规则）。
+    client_id = _client_id(request)
     for item in req.tasks:
         try:
             task = server_downloader.add_task(
@@ -665,6 +717,7 @@ async def create_local_downloads(req: ServerBatchDownloadRequest):
                 audio_backup_urls=item.audio_backup_urls,
                 batch_id=batch_id,
                 batch_title=batch_title,
+                owner=client_id,
             )
             created_tasks.append(task)
         except DuplicateTaskError as exc:
@@ -675,6 +728,7 @@ async def create_local_downloads(req: ServerBatchDownloadRequest):
                 "filename": item.filename,
                 "reason": str(exc),
                 "existing_id": exc.existing.id,
+                "existing_owner": exc.existing.owner or "",
             })
     return {
         "success": True,
@@ -690,9 +744,13 @@ async def task_events():
     return await server_events()
 
 @app.get("/api/server/events")
-async def server_events():
-    """SSE 实时推送服务端下载与归档进度"""
-    queue = server_downloader.subscribe()
+async def server_events(request: Request):
+    """SSE 实时推送服务端下载与归档进度
+
+    连接携带设备标识（**只能走 query** —— EventSource 不允许自定义请求头），
+    事件按归属定向推送：B 的浏览器不该在网络面板里看到 A 的任务详情。
+    """
+    queue = server_downloader.subscribe(_client_id(request))
 
     async def event_generator():
         import json

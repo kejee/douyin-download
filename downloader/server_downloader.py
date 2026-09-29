@@ -72,6 +72,11 @@ class ServerTask(BaseModel):
     audio_url: Optional[str] = None
     sessdata: Optional[str] = None
     channel: str = "server"  # server: NAS/服务端归档 | local: 桌面端本地保存
+    # 发起这次下载的浏览器/设备标识（前端 localStorage 生成，随请求带上）。
+    # NAS 上全家共用同一个后端进程，没有归属的话任务列表是"公共看板"：
+    # B 能看到 A 正在下的卡片，而且卡片上的暂停/取消按钮能直接操作 A 的任务。
+    # 为空 = 无标识客户端（老前端 / curl），此时不做隔离。
+    owner: str = ""
     platform: str = "media"  # 来源平台（bilibili / douyin / xhs ...），历史记录里要展示
     # 批次信息：同一次批量提交（合集 / 多选）的任务共享 batch_id，
     # 历史记录里折叠成一行，淘汰时也只占一个"组"名额。《单条提交为空》
@@ -108,7 +113,9 @@ class ServerDownloadManager:
         self.tasks: Dict[str, ServerTask] = {}
         self.task_controllers: Dict[str, asyncio.Event] = {}
         self.router = UnifiedMediaRouter()
-        self.listeners: List[asyncio.Queue] = []
+        # SSE 订阅者：(队列, 该连接携带的设备标识)。用元组而不是单纯列队列，
+        # 是为了让事件能按归属定向推送（见 subscribe / _notify_listeners）。
+        self.listeners: List[tuple] = []
         self._worker_task = None
         self._running = True
         # 并发闸门：不用 asyncio.Semaphore —— 它的容量创建后无法修改，
@@ -387,6 +394,7 @@ class ServerDownloadManager:
         audio_backup_urls: Optional[List[str]] = None,
         batch_id: Optional[str] = None,
         batch_title: Optional[str] = None,
+        owner: str = "",
     ) -> ServerTask:
         """解析归档路径并加入下载队列。
 
@@ -412,6 +420,12 @@ class ServerDownloadManager:
 
         # 同一目标路径只允许一个活动任务。已完成 / 失败 / 取消的任务不阻塞，
         # 否则用户想重下已失败的文件就永远排不进去。
+        #
+        # ⚠️ 这里**刻意不按 owner 过滤**，即使任务列表已经按设备隔离了。
+        # 两个人的任务写的是同一个 save_path，去重一旦按设备切开，
+        # 两个协程就会同时写同一个临时文件：后开者 "wb" 截断前者已写内容、
+        # 两者各自维护 offset 写同一 inode（内容交错），先完成者 rename 走文件后
+        # 后完成者 rename 直接 FileNotFoundError。跨设备去重是数据安全底线。
         for existing in self.tasks.values():
             if existing.save_path == save_path and existing.status in ("waiting", "running", "paused"):
                 logger.info(
@@ -434,6 +448,7 @@ class ServerDownloadManager:
             audio_url=audio_url,
             sessdata=sessdata,
             channel=channel,
+            owner=(owner or "").strip(),
             platform=platform or "media",
             batch_id=(batch_id or "").strip(),
             batch_title=(batch_title or "").strip(),
@@ -849,7 +864,27 @@ class ServerDownloadManager:
         if proc.returncode != 0:
             raise RuntimeError(f"FFmpeg 封装失败: {stderr.decode('utf-8', errors='ignore')}")
 
-    def pause_task(self, task_id: str) -> bool:
+    @staticmethod
+    def _may_operate(task: "ServerTask", owner: Optional[str]) -> bool:
+        """这个设备有没有资格操作这个任务。
+
+        - owner 为空：调用方没有设备标识（curl / 老前端）→ 不校验，保持旧行为；
+        - 任务 owner 为空：历史遗留 → 放行，免得出现"谁都动不了"的死任务；
+        - 其余：必须归属一致。
+
+        界面已经不显示其他设备的卡片了，这是纵深防御 —— 接口能被手工调用。
+        """
+        if not owner:
+            return True
+        return (not task.owner) or task.owner == owner
+
+    def list_tasks(self, owner: Optional[str] = None) -> List[ServerTask]:
+        """按归属列出任务（owner 为空 = 不隔离，返回全部）"""
+        if not owner:
+            return list(self.tasks.values())
+        return [t for t in self.tasks.values() if self._may_operate(t, owner)]
+
+    def pause_task(self, task_id: str, owner: Optional[str] = None) -> bool:
         """暂停任务。只对进行中的任务生效。
 
         此前不带状态判断：已完成（success）的任务被暂停后会变成 paused，
@@ -857,6 +892,8 @@ class ServerDownloadManager:
         """
         if task_id in self.tasks:
             task = self.tasks[task_id]
+            if not self._may_operate(task, owner):
+                return False
             if task.status not in ("waiting", "running"):
                 return False
             task.status = "paused"
@@ -864,9 +901,11 @@ class ServerDownloadManager:
             return True
         return False
 
-    def resume_task(self, task_id: str) -> bool:
+    def resume_task(self, task_id: str, owner: Optional[str] = None) -> bool:
         if task_id in self.tasks:
             task = self.tasks[task_id]
+            if not self._may_operate(task, owner):
+                return False
             if task.status in ["paused", "error"]:
                 task.status = "waiting"
                 self._notify_listeners("task_resumed", task.dict())
@@ -874,9 +913,11 @@ class ServerDownloadManager:
                 return True
         return False
 
-    def cancel_task(self, task_id: str) -> bool:
+    def cancel_task(self, task_id: str, owner: Optional[str] = None) -> bool:
         if task_id in self.tasks:
             task = self.tasks[task_id]
+            if not self._may_operate(task, owner):
+                return False
             # 只取消活动任务：对已完成/已取消的任务"再取消一次"会把终态改坏，
             # 也会往历史里塞重复条目（与 pause_task 同款防护）。
             if task.status not in ("waiting", "running", "paused"):
@@ -889,8 +930,11 @@ class ServerDownloadManager:
             return True
         return False
 
-    def clear_completed(self) -> int:
-        to_del = [tid for tid, t in self.tasks.items() if t.status in ["success", "canceled", "error"]]
+    def clear_completed(self, owner: Optional[str] = None) -> int:
+        to_del = [
+            tid for tid, t in self.tasks.items()
+            if t.status in ["success", "canceled", "error"] and self._may_operate(t, owner)
+        ]
         for tid in to_del:
             task = self.tasks[tid]
             # 成功任务的临时分片已被 rename 掉；失败/取消的可能还留着，一并回收
@@ -903,7 +947,7 @@ class ServerDownloadManager:
             delete_history(to_del)
         return len(to_del)
 
-    def clear_settled_tasks(self) -> int:
+    def clear_settled_tasks(self, owner: Optional[str] = None) -> int:
         """清空「已完成与历史」区在内存里的那一份：success / canceled。
 
         与 clear_completed 的两点区别（别合并回一个方法）：
@@ -915,8 +959,14 @@ class ServerDownloadManager:
         必须连内存任务一起清：历史区的数据来源是「内存终态任务 + 持久化历史」两条，
         只清持久化历史的话，前端清完 taskQueue，下次 /api/server/tasks 同步又把旧任务
         灌回来，界面上历史区会"复活"，看起来像按钮没生效。
+
+        owner 给定时只清自己的终态任务 —— 否则一个人点「清空」，共用 NAS 的
+        其他人内存里的历史也跟着消失。
         """
-        to_del = [tid for tid, t in self.tasks.items() if t.status in ("success", "canceled")]
+        to_del = [
+            tid for tid, t in self.tasks.items()
+            if t.status in ("success", "canceled") and self._may_operate(t, owner)
+        ]
         for tid in to_del:
             task = self.tasks[tid]
             # 成功的临时分片已 rename 掉；取消的可能还留着，一并回收
@@ -952,22 +1002,33 @@ class ServerDownloadManager:
                 error=task.error or "",
                 batch_id=getattr(task, "batch_id", "") or "",
                 batch_title=getattr(task, "batch_title", "") or "",
+                owner=getattr(task, "owner", "") or "",
             )
         except Exception as e:
             logger.warning(f"[{task.id}] 写入下载历史失败: {e}")
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, client_id: str = "") -> asyncio.Queue:
+        """订阅事件流。client_id 用于**定向推送**：只把属于它的任务事件推给它。
+
+        为什么要按连接定向，而不是"全推、前端自己过滤"：SSE 是明文广播，
+        后者会让 B 的浏览器在网络面板里看到 A 的完整任务（文件名、路径、进度）。
+        界面上看不见 ≠ 拿不到。这里在源头就掐掉。
+        """
         q = asyncio.Queue()
-        self.listeners.append(q)
+        self.listeners.append((q, (client_id or "").strip()))
         return q
 
     def unsubscribe(self, q: asyncio.Queue):
-        if q in self.listeners:
-            self.listeners.remove(q)
+        self.listeners = [(qq, cid) for qq, cid in self.listeners if qq is not q]
 
     def _notify_listeners(self, event_type: str, data: Dict[str, Any]):
+        owner = (data or {}).get("owner") or ""
         message = {"event": event_type, "data": data, "timestamp": time.time()}
-        for q in list(self.listeners):
+        for q, cid in list(self.listeners):
+            # 定向：连接带了标识、且事件属于别的设备 → 不推。
+            # 两边任一为空都照推（无标识客户端 / 无归属任务），保持向后兼容。
+            if cid and owner and cid != owner:
+                continue
             try:
                 q.put_nowait(message)
             except Exception:

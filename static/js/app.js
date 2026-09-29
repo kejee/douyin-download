@@ -34,6 +34,61 @@ function showToast(message, type = "info", duration = 3000) {
     }, duration);
 }
 
+// ==========================================================================
+// 设备标识（client_id）—— 多设备共用一个后端时的归属凭据
+//
+// 为什么需要：NAS 上只有一个后端进程、一份 history.json、一份任务表。
+// 没有归属的话，任何浏览器打开都是"公共看板"——能看到别人正在下的任务
+// （卡片上还带暂停/取消按钮）、能操作别人的任务、能看到并清空所有人的历史。
+//
+// 粒度说明：标识存在 localStorage，所以粒度是**浏览器**而不是"设备"。
+// 同一台电脑的 Safari 与 Chrome 各算一个 —— 这与 B站 SESSDATA 的粒度一致
+// （也是每个浏览器独立）。清掉浏览器数据即换了新身份，旧记录不会消失，
+// 只是变成"其他设备"的记录，在往期区仍可展开查看。
+// ==========================================================================
+const UD_CLIENT_ID_KEY = "ud_client_id";
+
+function loadClientId() {
+    const fresh = () => (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    try {
+        let id = localStorage.getItem(UD_CLIENT_ID_KEY);
+        if (!id) {
+            id = fresh();
+            localStorage.setItem(UD_CLIENT_ID_KEY, id);
+        }
+        return id;
+    } catch (e) {
+        // 隐私模式 / 存储被禁：退化成"本次会话一个身份"。隔离仍然生效，
+        // 只是刷新后自己也会变成"另一台设备"——好过整个功能不可用。
+        console.warn("无法持久化设备标识，降级为会话级:", e);
+        return fresh();
+    }
+}
+
+window.udClientId = loadClientId();
+
+// 统一给**同源**请求带上标识。
+//
+// 为什么不逐个 fetch 手写：本项目有 30+ 处 fetch 调用，手写一定会漏，
+// 而漏掉的那一处就是"隔离静默失效"的地方（表现为某个入口又能看到别人的东西）。
+// 注入给第三方 URL 会触发 CORS 预检失败，所以只对同源请求注入。
+(function installClientIdHeader() {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = (input, init = {}) => {
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        const sameOrigin = !/^([a-z]+:)?\/\//i.test(url) || url.startsWith(window.location.origin);
+        if (!sameOrigin) return originalFetch(input, init);
+        const headers = new Headers(
+            init.headers
+            || (typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined)
+        );
+        headers.set("X-Client-Id", window.udClientId);
+        return originalFetch(input, { ...init, headers });
+    };
+})();
+
 // B站 SESSDATA 凭证管理
 function getBiliSessdata() {
     return (localStorage.getItem("bili_sessdata") || "").trim();
@@ -1663,6 +1718,10 @@ async function initServerArchiving() {
 function applyServerTask(data, allowCreate = true) {
     if (!data || !data.id) return false;
     if (data.channel === "preview") return false;   // 预览缓存不在任务列表里呈现
+    // 归属兜底：后端已按连接定向推送，这里再判一次。
+    // SSE 只是"实时增强"，快照才是权威源；万一有连接串了归属（或将来有人改了
+    // 推送规则），界面也不能因为推送而多出别人的任务。
+    if (data.owner && data.owner !== window.udClientId) return false;
 
     const localTask = window.taskQueue.find(t => t.id === data.id);
     if (localTask) {
@@ -1755,7 +1814,12 @@ function stopServerSyncFallback() {
 
 function startServerEventStream() {
     try {
-        const evtSource = new EventSource("/api/server/events");
+        // 标识只能走 query：EventSource 不支持自定义请求头（浏览器 API 硬限制）。
+        // 后端据此把事件**定向**推给同归属的连接 —— 不只是"前端不显示"，
+        // 而是别人的任务详情根本不进这条连接。
+        const evtSource = new EventSource(
+            `/api/server/events?client_id=${encodeURIComponent(window.udClientId)}`
+        );
         evtSource.onopen = () => {
             // 连上就停掉兜底轮询，并补一次快照（把断开期间错过的变化补回来）
             stopServerSyncFallback();
@@ -1840,7 +1904,10 @@ window._tmStructureSignature = null;
 //   1. 当前会话内还留在 taskQueue 里的终态任务；
 //   2. 后端 history.json（任务终结时落盘，重启后仍在）。
 // ==========================================================================
-window.taskHistory = [];          // 后端持久化的历史（最近的在前）
+window.taskHistory = [];          // 后端持久化的历史（最近的在前）—— 只含本设备
+window.taskHistoryOthers = [];    // 其他设备的历史（最多 50 条，默认折叠、只读）
+window._tmOtherCount = 0;         // 其他设备的记录总数（可能多于已拉回的条数）
+window._tmOthersExpanded = false; // 其他设备的记录是否已展开查看
 window._tmHistoryExpanded = false; // 往期区是否展开
 // 已展开的批次（batch_id 集合）。放在内存里即可：批次是"看历史"的临时视图，
 // 不值得落 localStorage，重启后回到折叠态反而更清爽。
@@ -1876,28 +1943,42 @@ function _tmSessionTasks() {
     return [...unfinished, ...finished];
 }
 
+// history.json 的条目 → 任务卡片数据。自己与其他设备的记录共用这一个转换，
+// 免得两处字段口径漂移（本项目已多次吃过"同一种数据两份映射"的亏）。
+// isOther = true 表示这条记录属于别的设备：只读，不渲染任何操作按钮。
+function _tmHistoryEntryToItem(h, isOther = false) {
+    return {
+        id: h.id,
+        title: h.title || h.filename || '已下载',
+        filename: h.filename || '',
+        status: h.status === 'canceled' ? 'canceled' : (h.status === 'error' ? 'error' : 'success'),
+        progress: h.status === 'success' ? 100 : 0,
+        sizeBytes: h.size_bytes || 0,
+        totalBytes: h.status === 'success' ? (h.size_bytes || 0) : 0,
+        downloadedBytes: h.status === 'success' ? (h.size_bytes || 0) : 0,
+        savePath: h.save_path || '',
+        platform: h.platform || '',
+        finishedAt: h.finished_at || 0,
+        errorMsg: h.error || '',
+        batchId: h.batch_id || '',
+        batchTitle: h.batch_title || '',
+        fromHistory: true,
+        isOtherDevice: isOther,
+    };
+}
+
 // 往期记录 = 持久化历史里「不属于本次会话」的那部分（重启后加载进来的）
 function _tmPastItems() {
     const liveIds = new Set(window.taskQueue.map(t => t.id));
     return window.taskHistory
         .filter(h => !liveIds.has(h.id))
-        .map(h => ({
-            id: h.id,
-            title: h.title || h.filename || '已下载',
-            filename: h.filename || '',
-            status: h.status === 'canceled' ? 'canceled' : (h.status === 'error' ? 'error' : 'success'),
-            progress: h.status === 'success' ? 100 : 0,
-            sizeBytes: h.size_bytes || 0,
-            totalBytes: h.status === 'success' ? (h.size_bytes || 0) : 0,
-            downloadedBytes: h.status === 'success' ? (h.size_bytes || 0) : 0,
-            savePath: h.save_path || '',
-            platform: h.platform || '',
-            finishedAt: h.finished_at || 0,
-            errorMsg: h.error || '',
-            batchId: h.batch_id || '',
-            batchTitle: h.batch_title || '',
-            fromHistory: true,
-        }));
+        .map(h => _tmHistoryEntryToItem(h, false));
+}
+
+// 其他设备的往期记录：同样按批次折叠，但**逐条标记只读**，且不参与任何计数
+// （「清空」的作用范围必须与本设备的数据严格一致，混进来数字就对不上了）。
+function _tmOtherItems() {
+    return (window.taskHistoryOthers || []).map(h => _tmHistoryEntryToItem(h, true));
 }
 
 // 把往期记录按批次折叠。
@@ -1909,19 +1990,23 @@ function _tmGroupPast(items) {
     const byBatch = new Map();
     items.forEach(it => {
         const bid = (it.batchId || '').trim();
+        // isOther：整组只读（其他设备的记录）。batch_id 由一次提交生成，
+        // 一批里不会混归属；万一数据被手工改乱，只要有一项不属于本设备就整组只读。
+        const groupIsOther = !!it.isOtherDevice;
         if (!bid) {
-            groups.push({ kind: 'single', item: it });
+            groups.push({ kind: 'single', item: it, isOther: groupIsOther });
             return;
         }
         let g = byBatch.get(bid);
         if (!g) {
             g = {
                 kind: 'batch', batchId: bid, title: it.batchTitle || '批量下载',
-                items: [], sizeBytes: 0, finishedAt: 0,
+                items: [], sizeBytes: 0, finishedAt: 0, isOther: groupIsOther,
             };
             byBatch.set(bid, g);
             groups.push(g);
         }
+        if (groupIsOther) g.isOther = true;
         g.items.push(it);
         g.sizeBytes += it.sizeBytes || 0;
         g.finishedAt = Math.max(g.finishedAt, it.finishedAt || 0);
@@ -2121,10 +2206,12 @@ function renderTaskManagerUI() {
         }
     }
 
-    // 往期区的结构签名（含展开状态与各批次的展开状态）与已完成条数：只算一次，
-    // 供 _tmSignature 与 updateTaskBubble 复用（两者都在进度事件里高频调用）
+    // 往期区的结构签名（含展开状态、各批次的展开状态、其他设备区的展开状态）：
+    // 只算一次，供 _tmSignature 与 updateTaskBubble 复用（两者都在进度事件里高频调用）
     window._tmHistorySig = [
         window._tmHistoryExpanded ? 1 : 0,
+        window._tmOthersExpanded ? 1 : 0,
+        window._tmOtherCount || 0,
         Array.from(window._tmExpandedBatches || []).sort().join(','),
         pastGroups.map(g => (g.kind === 'batch'
             ? `B:${g.batchId}:${g.items.length}`
@@ -2142,7 +2229,10 @@ function renderTaskManagerUI() {
     }
     window._tmStructureSignature = signature;
 
-    if (sessionTasks.length === 0 && pastGroups.length === 0) {
+    // 空态：本设备既没有活跃任务也没有往期记录。但**其他设备有记录时不算空** ——
+    // 那种情况下要显示"其他设备的记录"这一行（正是新设备/新浏览器最需要看到的信息，
+    // 不然用户会以为历史全丢了）。
+    if (sessionTasks.length === 0 && pastGroups.length === 0 && !window._tmOtherCount) {
         listEl.innerHTML = `
             <div style="text-align: center; color: var(--text-dim); padding: 30px 10px; font-size: 12px;">
                 <i class="fa-solid fa-list-check" style="font-size: 24px; margin-bottom: 8px; color: var(--text-muted);"></i>
@@ -2209,6 +2299,39 @@ function renderTaskManagerUI() {
         }
     }
 
+    // ---- 其他设备的记录（共用一台 NAS 时别的浏览器下的东西）----
+    //
+    // 默认折叠且**只读**（后端同样拒绝越权删除）。必须显式列出并给出条数：
+    // 换了浏览器/换了设备打开时看不到自己的记录，如果没有这行提示，用户会直接
+    // 得出"历史丢了"的结论 —— 而事实是它在那台设备上好好的。
+    // 它不参与「清空 (N)」的计数：计数口径必须严格等于本设备的数据范围。
+    if (window._tmOtherCount > 0) {
+        const otherGroups = _tmGroupPast(_tmOtherItems());
+        const oIcon = window._tmOthersExpanded ? "fa-chevron-up" : "fa-chevron-down";
+        parts.push(`
+            <div class="task-history-collapse" data-tm-hist="others" title="${
+                window._tmOthersExpanded ? "收起其他设备的记录" : "查看其他设备的记录（只读）"}">
+                <span><i class="fa-solid fa-desktop"></i> 其他设备的记录 · ${window._tmOtherCount} 条</span>
+                <span class="task-history-collapse-actions">
+                    <i class="fa-solid ${oIcon}"></i>
+                </span>
+            </div>
+        `);
+        if (window._tmOthersExpanded) {
+            otherGroups.slice(0, TM_HISTORY_RENDER_LIMIT).forEach(g => parts.push(
+                g.kind === 'batch' ? renderBatchRow(g) : renderTaskCard(g.item, true)
+            ));
+            const fetched = (window.taskHistoryOthers || []).length;
+            if (window._tmOtherCount > fetched) {
+                parts.push(`
+                    <div style="color: var(--text-dim); font-size: 11px; padding: 2px 2px 0;">
+                        仅显示最近 ${fetched} 条（共 ${window._tmOtherCount} 条）
+                    </div>
+                `);
+            }
+        }
+    }
+
     listEl.innerHTML = parts.join("");
 }
 
@@ -2225,11 +2348,12 @@ function renderBatchRow(g) {
             <span class="task-batch-title">${escapeHtml(g.title)}</span>
             <span class="task-batch-meta">${g.items.length} 个文件 · ${formatBytes(g.sizeBytes)}${
                 timeText ? ` · ${timeText}` : ""
-            }</span>
+            }${g.isOther ? ` · <span title="由其他设备发起，仅可查看">其他设备</span>` : ""}</span>
+            ${g.isOther ? "" : `
             <button class="btn-task-action" data-batch-remove="${bid}"
                     title="从往期记录中移除整批（不会删除已下载的文件）">
                 <i class="fa-solid fa-trash-can"></i>
-            </button>
+            </button>`}
             <i class="fa-solid ${open ? "fa-chevron-up" : "fa-chevron-down"}"></i>
         </div>
         ${shown.length ? `<div class="task-batch-items">${
@@ -2310,7 +2434,7 @@ function renderTaskCard(t, isHistory) {
                         <button class="btn-task-action is-danger" data-task-action="cancel" data-task-id="${t.id}" title="取消此任务（已下载的分片会丢弃）">
                             <i class="fa-solid fa-xmark"></i>
                         </button>` : ''}
-                        ${isHistory ? `
+                        ${isHistory && !t.isOtherDevice ? `
                         <button class="btn-task-action" data-task-action="forget" data-task-id="${t.id}" title="从历史记录中移除（不删除文件）">
                             <i class="fa-solid fa-trash-can"></i>
                         </button>` : ''}
@@ -2352,12 +2476,15 @@ function renderTaskCard(t, isHistory) {
         else if (action === "forget") forgetHistoryItem(taskId);
     };
 
-    // 分区标题行上的操作（展开/收起历史、清空历史）。
+    // 分区标题行上的操作（展开/收起历史、展开其他设备的记录）。
     // 与任务按钮同样走 pointerdown：这一行也在重建区域内，click 会被重渲染吃掉。
     const runGroupAction = (el) => {
         const act = el.dataset.tmHist;
         if (act === "toggle") {
             window._tmHistoryExpanded = !window._tmHistoryExpanded;
+            renderTaskManagerUI();
+        } else if (act === "others") {
+            window._tmOthersExpanded = !window._tmOthersExpanded;
             renderTaskManagerUI();
         }
     };
@@ -2492,7 +2619,7 @@ async function submitTaskToBackend(task) {
         // 后端判定目标路径上已有活动任务：说明本条是重复入队，直接移除即可
         if (data.skipped && data.skipped.length) {
             window.taskQueue = window.taskQueue.filter(t => t.id !== task.id);
-            showToast(data.skipped[0].reason || "该文件已在下载队列中", "info");
+            showToast(_dupSkipMessage(data.skipped[0]), "info");
             renderTaskManagerUI();
             return;
         }
@@ -2778,12 +2905,17 @@ function removeTask(taskId) {
 // ==========================================================================
 
 // 从后端拉取持久化历史（客户端启动时调用一次）
+//
+// 后端只回本设备的记录（外加无归属的老记录）当 entries，其他设备的最多回 50 条
+// 当 others —— 只用来"展开看看"，所以不需要按需请求，切换纯本地展开。
 async function loadDownloadHistory() {
     try {
         const resp = await fetch("/api/history");
         if (!resp.ok) return;
         const data = await resp.json();
         window.taskHistory = Array.isArray(data.entries) ? data.entries : [];
+        window.taskHistoryOthers = Array.isArray(data.others) ? data.others : [];
+        window._tmOtherCount = data.others_count || 0;
         // 历史变了，结构签名必须作废，否则界面不会重建
         window._tmStructureSignature = null;
         renderTaskManagerUI();
@@ -2795,6 +2927,12 @@ async function loadDownloadHistory() {
 
 // 从历史里移除单条（只删记录，不动文件）
 async function forgetHistoryItem(taskId) {
+    // 其他设备的记录只读：界面上不渲染按钮，这里再挡一层（纵深防御，
+    // 免得将来某处复用这个函数时把别人的记录删了）
+    if ((window.taskHistoryOthers || []).some(h => h.id === taskId)) {
+        showToast("其他设备的记录只能查看", "info");
+        return;
+    }
     window.taskHistory = window.taskHistory.filter(h => h.id !== taskId);
     // 会话内还没被清掉的任务也一并从列表移除，避免"删了还在"
     window.taskQueue = window.taskQueue.filter(t => t.id !== taskId);
@@ -2817,7 +2955,11 @@ async function deleteHistoryRecords(ids) {
     }
 }
 
-// 清空**全部已完成记录**：本次会话的已完成/已取消 + 全部往期。
+// 清空**本设备的全部已完成记录**：本次会话的已完成/已取消 + 本设备的全部往期。
+//
+// 范围严格等于「本设备」：后端按设备标识过滤，其他设备的记录一条都不动
+// （共用 NAS 时一个人点清空、全家历史归零是灾难）。往期区里"其他设备的记录"
+// 因此不计入这里的计数，也不需要重新拉取。
 //
 // 为什么放在抽屉头部而不是往期行上：它的范围横跨「本次任务」与「往期记录」两块区域，
 // 挂在任一块里都会出现"按钮范围 ≠ 所在区域"的歧义 —— 这在 v2.5.5.0 已经踩过一次
@@ -3075,6 +3217,20 @@ function syncConcurrencySelect() {
 // 原先只有「合集/分P」做了这个判断，单条视频、图集、单集下载都漏了。
 //
 // 返回是否至少创建了 1 个任务。
+// 重复入队的提示文案。
+//
+// 后端的"同一目标路径只允许一个活动任务"是**跨设备**判定（归档目录只有一份，
+// 去重一旦按设备切开就会有两个协程写同一个临时文件）。所以"已在下载队列中"那条任务
+// 很可能属于别的设备 —— 而它不在本设备的任务列表里。不说清楚，用户会去翻一条
+// 根本不存在的任务，然后怀疑是界面丢了任务。
+function _dupSkipMessage(skip) {
+    const base = (skip && skip.reason) || "该文件已在下载队列中";
+    if (skip && skip.existing_owner && skip.existing_owner !== window.udClientId) {
+        return `${base}（由其他设备发起，本设备看不到该任务）`;
+    }
+    return base;
+}
+
 async function submitTasksToServerArchive(items, options = {}) {
     if (!items || !items.length) return false;
 
@@ -3109,7 +3265,7 @@ async function submitTasksToServerArchive(items, options = {}) {
             showToast(options.toastOk || `已提交 ${created} 个任务到 NAS 归档（存到挂载目录，不占本机）`, "success");
         } else if (skipped > 0) {
             const first = (res.skipped && res.skipped[0]) || {};
-            showToast(first.reason || "该文件已在归档队列中", "info");
+            showToast(_dupSkipMessage(first), "info");
         }
         if (options.openDrawer !== false) toggleTaskManager(true);
         return created > 0;

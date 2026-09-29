@@ -71,6 +71,8 @@ class ServerTask(BaseModel):
     direct_url: Optional[str] = None
     audio_url: Optional[str] = None
     sessdata: Optional[str] = None
+    twitter_auth_token: Optional[str] = None
+    twitter_ct0: Optional[str] = None
     channel: str = "server"  # server: NAS/服务端归档 | local: 桌面端本地保存
     # 发起这次下载的浏览器/设备标识（前端 localStorage 生成，随请求带上）。
     # NAS 上全家共用同一个后端进程，没有归属的话任务列表是"公共看板"：
@@ -412,6 +414,8 @@ class ServerDownloadManager:
         platform: str = "media",
         page_num: Optional[int] = None,
         sessdata: Optional[str] = None,
+        twitter_auth_token: Optional[str] = None,
+        twitter_ct0: Optional[str] = None,
         channel: str = "server",
         filename: Optional[str] = None,
         subdir: Optional[str] = None,
@@ -473,6 +477,8 @@ class ServerDownloadManager:
             direct_url=direct_url,
             audio_url=audio_url,
             sessdata=sessdata,
+            twitter_auth_token=twitter_auth_token,
+            twitter_ct0=twitter_ct0,
             channel=channel,
             owner=(owner or "").strip(),
             platform=platform or "media",
@@ -542,7 +548,12 @@ class ServerDownloadManager:
 
                 # 如果传入的是作品/分集页面链接，先进行核心解析
                 if not v_url and task.url:
-                    parse_result = await self.router.parse(task.url, sessdata=task.sessdata)
+                    parse_result = await self.router.parse(
+                        task.url,
+                        sessdata=task.sessdata,
+                        twitter_auth_token=task.twitter_auth_token,
+                        twitter_ct0=task.twitter_ct0,
+                    )
                     if not parse_result.success or not parse_result.video:
                         raise ValueError(parse_result.error or "解析媒体数据失败")
                     v_url = parse_result.video.no_watermark_url

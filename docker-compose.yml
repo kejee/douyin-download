@@ -47,6 +47,9 @@ services:
       # 取值：浏览器登录 bilibili.com → F12 → Application → Cookies → 复制 SESSDATA。
       # 注意：某个浏览器若在网页界面里单独设过，会**覆盖**这里的值（优先级更高）。
       - SESSDATA=
+      # ── 可选：Twitter / X auth_token（解锁敏感内容 / 需登录推文）──
+      # - TWITTER_AUTH_TOKEN=
+      # - TWITTER_CT0=
       # 可选：解析 YouTube / Twitter 需要代理
       # - HTTP_PROXY=http://192.168.1.2:7890
       # - HTTPS_PROXY=http://192.168.1.2:7890

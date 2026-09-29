@@ -77,7 +77,15 @@ class TwitterExtractor(BaseExtractor):
                 pass
         return url
 
-    async def extract(self, url: str) -> MediaResponse:
+    async def extract(
+        self,
+        url: str,
+        auth_token: Optional[str] = None,
+        ct0: Optional[str] = None,
+    ) -> MediaResponse:
+        auth_token = (auth_token or "").strip() or os.getenv("TWITTER_AUTH_TOKEN", "").strip() or None
+        ct0 = (ct0 or "").strip() or os.getenv("TWITTER_CT0", "").strip() or None
+
         real_url = await self._resolve_short_url(url)
         tweet_id = self._extract_tweet_id(real_url)
         
@@ -98,7 +106,7 @@ class TwitterExtractor(BaseExtractor):
                 error="无法识别推文链接中的 Tweet ID，请提供格式如 https://x.com/username/status/123456 的链接",
             )
 
-        # 1. 优先通道 A: 尝试通过官方 Syndication API / 开放接口获取
+        # 1. 优先通道 A: 尝试通过官方 Syndication API / 开放接口获取（匿名极速）
         try:
             res = await self._extract_via_api(tweet_id)
             if res and res.success:
@@ -106,9 +114,11 @@ class TwitterExtractor(BaseExtractor):
         except Exception:
             pass
 
-        # 2. 坚固兜底通道 B: 调用 yt-dlp
+        # 2. 坚固兜底通道 B: 调用 yt-dlp（支持凭证解锁敏感/需登录推文）
         try:
-            res_ytdlp = await self._extract_via_ytdlp(real_url or url, tweet_id)
+            res_ytdlp = await self._extract_via_ytdlp(
+                real_url or url, tweet_id, auth_token=auth_token, ct0=ct0
+            )
             if res_ytdlp and res_ytdlp.success:
                 return res_ytdlp
         except Exception as e:
@@ -124,6 +134,11 @@ class TwitterExtractor(BaseExtractor):
                 error=f"解析 Twitter 推文失败: {str(e)}",
             )
 
+        err_msg = (
+            "无法获取该推文媒体内容（推文可能已删除、设为私密或当前 Twitter 凭证已失效）"
+            if auth_token
+            else "无法获取该推文媒体内容（此推文可能需要登录或含敏感内容。请配置 Twitter auth_token 凭证后重试）"
+        )
         return MediaResponse(
             success=False,
             platform="twitter",
@@ -133,7 +148,7 @@ class TwitterExtractor(BaseExtractor):
             title="",
             author=AuthorInfo(),
             statistics=StatisticsInfo(),
-            error="无法获取该推文媒体内容（可能推文已删除、设为私密或需要登录）",
+            error=err_msg,
         )
 
     async def _extract_via_api(self, tweet_id: str) -> Optional[MediaResponse]:
@@ -331,16 +346,30 @@ class TwitterExtractor(BaseExtractor):
 
         return None
 
-    async def _extract_via_ytdlp(self, url: str, tweet_id: str) -> Optional[MediaResponse]:
-        """通过 yt-dlp 引擎提取"""
+    async def _extract_via_ytdlp(
+        self,
+        url: str,
+        tweet_id: str,
+        auth_token: Optional[str] = None,
+        ct0: Optional[str] = None,
+    ) -> Optional[MediaResponse]:
+        """通过 yt-dlp 引擎提取（支持 Cookie/Token 鉴权）"""
         cmd = [
             "yt-dlp",
             "-j",
             "--no-warnings",
             "--no-check-certificates",
             "--socket-timeout", "15",
-            url
         ]
+
+        if auth_token:
+            cookie_parts = [f"auth_token={auth_token}"]
+            if ct0:
+                cookie_parts.append(f"ct0={ct0}")
+                cmd.extend(["--add-header", f"x-csrf-token:{ct0}"])
+            cmd.extend(["--add-header", f"Cookie:{'; '.join(cookie_parts)}"])
+
+        cmd.append(url)
 
         if self.proxy:
             cmd.extend(["--proxy", self.proxy])

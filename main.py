@@ -41,6 +41,8 @@ router = UnifiedMediaRouter()
 class ParseRequest(BaseModel):
     url: str
     sessdata: Optional[str] = None
+    twitter_auth_token: Optional[str] = None
+    twitter_ct0: Optional[str] = None
 
 class UserPostsRequest(BaseModel):
     url: str
@@ -71,7 +73,12 @@ async def parse_media(req: ParseRequest):
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="请输入有效的分享链接或文案")
     
-    result = await router.parse(req.url.strip(), sessdata=req.sessdata)
+    result = await router.parse(
+        req.url.strip(),
+        sessdata=req.sessdata,
+        twitter_auth_token=req.twitter_auth_token,
+        twitter_ct0=req.twitter_ct0,
+    )
     if not result.success:
         raise HTTPException(status_code=400, detail=result.error or "解析失败")
     
@@ -278,6 +285,8 @@ class ServerDownloadItem(BaseModel):
     platform: str = "media"
     page_num: Optional[int] = None
     sessdata: Optional[str] = None
+    twitter_auth_token: Optional[str] = None
+    twitter_ct0: Optional[str] = None
     filename: Optional[str] = None
     subdir: Optional[str] = None
     task_id: Optional[str] = None
@@ -363,6 +372,8 @@ async def create_server_downloads(req: ServerBatchDownloadRequest, request: Requ
                 platform=item.platform,
                 page_num=item.page_num,
                 sessdata=item.sessdata,
+                twitter_auth_token=item.twitter_auth_token,
+                twitter_ct0=item.twitter_ct0,
                 channel="server",
                 filename=item.filename,
                 subdir=item.subdir,
@@ -709,6 +720,8 @@ async def create_local_downloads(req: ServerBatchDownloadRequest, request: Reque
                 platform=item.platform,
                 page_num=item.page_num,
                 sessdata=item.sessdata,
+                twitter_auth_token=item.twitter_auth_token,
+                twitter_ct0=item.twitter_ct0,
                 channel="local",
                 filename=item.filename,
                 subdir=item.subdir,

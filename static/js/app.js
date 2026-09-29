@@ -108,6 +108,46 @@ function clearBiliSessdata() {
     updateBiliHelperBars();
 }
 
+// Twitter / X 凭证管理
+function getTwitterAuthToken() {
+    return (localStorage.getItem("twitter_auth_token") || "").trim();
+}
+
+function getTwitterCt0() {
+    return (localStorage.getItem("twitter_ct0") || "").trim();
+}
+
+function setTwitterCredentials(authToken, ct0) {
+    if (authToken && authToken.trim()) {
+        localStorage.setItem("twitter_auth_token", authToken.trim());
+    } else {
+        localStorage.removeItem("twitter_auth_token");
+    }
+    if (ct0 && ct0.trim()) {
+        localStorage.setItem("twitter_ct0", ct0.trim());
+    } else {
+        localStorage.removeItem("twitter_ct0");
+    }
+    updateTwitterHelperBars();
+}
+
+function clearTwitterCredentials() {
+    localStorage.removeItem("twitter_auth_token");
+    localStorage.removeItem("twitter_ct0");
+    updateTwitterHelperBars();
+}
+
+// 统一为请求附加平台鉴权凭证 (B站 SESSDATA / Twitter auth_token)
+function attachAuthCredentials(payload) {
+    const sessdata = getBiliSessdata();
+    if (sessdata) payload.sessdata = sessdata;
+    const twAuth = getTwitterAuthToken();
+    if (twAuth) payload.twitter_auth_token = twAuth;
+    const twCt0 = getTwitterCt0();
+    if (twCt0) payload.twitter_ct0 = twCt0;
+    return payload;
+}
+
 // 检查输入是否为 B站链接并更新专属胶囊提示栏 (方案 1)
 function checkBiliInput(text, barElement) {
     if (!barElement) return;
@@ -137,11 +177,45 @@ function checkBiliInput(text, barElement) {
     }
 }
 
+// 检查输入是否为 Twitter / X 链接并更新专属提示栏
+function checkTwitterInput(text, barElement) {
+    if (!barElement) return;
+    const isTwitter = text && (text.includes("twitter.com") || text.includes("x.com") || text.includes("t.co"));
+    if (isTwitter) {
+        barElement.style.display = "flex";
+        const hasToken = !!getTwitterAuthToken();
+        if (hasToken) {
+            barElement.innerHTML = `
+                <div class="bili-helper-left">
+                    <i class="fa-brands fa-x-twitter" style="color: #10b981;"></i>
+                    <span style="color: #10b981; font-weight: 500;">Twitter/X 通道：🟢 已配置账号凭据 (auth_token)</span>
+                </div>
+                <button type="button" class="btn-text-muted" onclick="openTwitterModal()">修改/清除</button>
+            `;
+        } else {
+            barElement.innerHTML = `
+                <div class="bili-helper-left">
+                    <i class="fa-brands fa-x-twitter text-gradient"></i>
+                    <span>Twitter/X 提示：访客模式（若遇敏感/需登录推文可配置凭证）</span>
+                </div>
+                <button type="button" class="btn-text-cyan" onclick="openTwitterModal()">⚙️ 配置 auth_token 凭证</button>
+            `;
+        }
+    } else {
+        barElement.style.display = "none";
+    }
+}
+
 function updateBiliHelperBars() {
     const biliHelperBar = document.getElementById("biliHelperBar");
     const biliCreatorHelperBar = document.getElementById("biliCreatorHelperBar");
     if (urlInput) checkBiliInput(urlInput.value, biliHelperBar);
     if (creatorUrlInput) checkBiliInput(creatorUrlInput.value, biliCreatorHelperBar);
+}
+
+function updateTwitterHelperBars() {
+    const twitterHelperBar = document.getElementById("twitterHelperBar");
+    if (urlInput) checkTwitterInput(urlInput.value, twitterHelperBar);
 }
 
 // 监听单作品与博主输入框变化
@@ -152,6 +226,7 @@ urlInput.addEventListener("input", () => {
         clearBtn.style.display = "none";
     }
     checkBiliInput(urlInput.value, document.getElementById("biliHelperBar"));
+    checkTwitterInput(urlInput.value, document.getElementById("twitterHelperBar"));
 });
 
 // 清空按钮
@@ -159,6 +234,7 @@ clearBtn.addEventListener("click", () => {
     urlInput.value = "";
     clearBtn.style.display = "none";
     checkBiliInput("", document.getElementById("biliHelperBar"));
+    checkTwitterInput("", document.getElementById("twitterHelperBar"));
     urlInput.focus();
 });
 
@@ -211,6 +287,7 @@ pasteBtn.addEventListener("click", async () => {
             urlInput.value = text;
             clearBtn.style.display = "inline-flex";
             checkBiliInput(text, document.getElementById("biliHelperBar"));
+            checkTwitterInput(text, document.getElementById("twitterHelperBar"));
             showToast("已从剪贴板粘贴内容", "success");
         } else {
             showToast("剪贴板为空", "info");
@@ -289,6 +366,90 @@ if (clearBiliModalBtn) {
         clearBiliSessdata();
         closeBiliModal();
         showToast("已清除 B站 SESSDATA 凭证", "info");
+    });
+}
+
+// Twitter / X 凭证配置弹窗逻辑
+const twitterConfigModal = document.getElementById("twitterConfigModal");
+const twitterAuthTokenInput = document.getElementById("twitterAuthTokenInput");
+const twitterCt0Input = document.getElementById("twitterCt0Input");
+const toggleTwitterGuideBtn = document.getElementById("toggleTwitterGuideBtn");
+const twitterGuideBox = document.getElementById("twitterGuideBox");
+const toggleTwitterAuthEyeBtn = document.getElementById("toggleTwitterAuthEyeBtn");
+const toggleTwitterCt0EyeBtn = document.getElementById("toggleTwitterCt0EyeBtn");
+const closeTwitterModalBtn = document.getElementById("closeTwitterModalBtn");
+const cancelTwitterModalBtn = document.getElementById("cancelTwitterModalBtn");
+const saveTwitterModalBtn = document.getElementById("saveTwitterModalBtn");
+const clearTwitterModalBtn = document.getElementById("clearTwitterModalBtn");
+
+function openTwitterModal() {
+    if (!twitterConfigModal) return;
+    if (twitterAuthTokenInput) twitterAuthTokenInput.value = getTwitterAuthToken();
+    if (twitterCt0Input) twitterCt0Input.value = getTwitterCt0();
+    twitterConfigModal.classList.add("active");
+}
+
+function closeTwitterModal() {
+    if (!twitterConfigModal) return;
+    twitterConfigModal.classList.remove("active");
+}
+
+if (closeTwitterModalBtn) closeTwitterModalBtn.addEventListener("click", closeTwitterModal);
+if (cancelTwitterModalBtn) cancelTwitterModalBtn.addEventListener("click", closeTwitterModal);
+if (twitterConfigModal) {
+    twitterConfigModal.addEventListener("click", (e) => {
+        if (e.target === twitterConfigModal) closeTwitterModal();
+    });
+}
+
+if (toggleTwitterGuideBtn && twitterGuideBox) {
+    toggleTwitterGuideBtn.addEventListener("click", () => {
+        const isHidden = twitterGuideBox.style.display === "none";
+        twitterGuideBox.style.display = isHidden ? "block" : "none";
+        toggleTwitterGuideBtn.textContent = isHidden ? "收起教程" : "如何获取？";
+    });
+}
+
+if (toggleTwitterAuthEyeBtn && twitterAuthTokenInput) {
+    toggleTwitterAuthEyeBtn.addEventListener("click", () => {
+        const isPwd = twitterAuthTokenInput.type === "password";
+        twitterAuthTokenInput.type = isPwd ? "text" : "password";
+        toggleTwitterAuthEyeBtn.innerHTML = isPwd ? `<i class="fa-regular fa-eye-slash"></i>` : `<i class="fa-regular fa-eye"></i>`;
+    });
+}
+
+if (toggleTwitterCt0EyeBtn && twitterCt0Input) {
+    toggleTwitterCt0EyeBtn.addEventListener("click", () => {
+        const isPwd = twitterCt0Input.type === "password";
+        twitterCt0Input.type = isPwd ? "text" : "password";
+        toggleTwitterCt0EyeBtn.innerHTML = isPwd ? `<i class="fa-regular fa-eye-slash"></i>` : `<i class="fa-regular fa-eye"></i>`;
+    });
+}
+
+if (saveTwitterModalBtn) {
+    saveTwitterModalBtn.addEventListener("click", () => {
+        const authToken = twitterAuthTokenInput ? twitterAuthTokenInput.value.trim() : "";
+        const ct0 = twitterCt0Input ? twitterCt0Input.value.trim() : "";
+        setTwitterCredentials(authToken, ct0);
+        closeTwitterModal();
+        if (authToken) {
+            showToast("Twitter / X 凭据保存成功！已启用登录态解析通道", "success");
+            if (urlInput && urlInput.value && (urlInput.value.includes("twitter.com") || urlInput.value.includes("x.com") || urlInput.value.includes("t.co"))) {
+                parseBtn.click();
+            }
+        } else {
+            showToast("已清空 Twitter 凭证，恢复为访客模式", "info");
+        }
+    });
+}
+
+if (clearTwitterModalBtn) {
+    clearTwitterModalBtn.addEventListener("click", () => {
+        if (twitterAuthTokenInput) twitterAuthTokenInput.value = "";
+        if (twitterCt0Input) twitterCt0Input.value = "";
+        clearTwitterCredentials();
+        closeTwitterModal();
+        showToast("已清除 Twitter 凭证", "info");
     });
 }
 
@@ -497,9 +658,7 @@ parseBtn.addEventListener("click", async () => {
     skeletonLoading.style.display = "grid";
 
     try {
-        const sessdata = getBiliSessdata();
-        const payload = { url: text };
-        if (sessdata) payload.sessdata = sessdata;
+        const payload = attachAuthCredentials({ url: text });
 
         const response = await fetch("/api/parse", {
             method: "POST",
@@ -519,6 +678,11 @@ parseBtn.addEventListener("click", async () => {
         showToast(`[${data.platform_name || '解析'}] 成功！`, "success");
     } catch (err) {
         showToast(err.message || "请求发生异常", "error");
+        if (err.message && (err.message.includes("Twitter") || err.message.includes("auth_token")) && (err.message.includes("登录") || err.message.includes("敏感"))) {
+            setTimeout(() => {
+                openTwitterModal();
+            }, 600);
+        }
     } finally {
         parseBtn.disabled = false;
         parseBtn.querySelector(".btn-text").style.display = "inline-block";
@@ -961,11 +1125,11 @@ async function switchEpisode(shareUrl, pageNum) {
     showToast(`正在切换至 P${pageNum}...`, "info");
 
     try {
-        const sessdata = getBiliSessdata();
+        const payload = attachAuthCredentials({ url: shareUrl });
         const response = await fetch("/api/parse", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: shareUrl, sessdata: sessdata || null }),
+            body: JSON.stringify(payload),
         });
 
         const data = await response.json();
@@ -2672,11 +2836,11 @@ async function runSingleTask(task) {
 
         // 如果需要先解析分享链接 (如分P单集或博主作品)
         if (!vUrl && task.share_url) {
-            const sessdata = getBiliSessdata();
+            const payload = attachAuthCredentials({ url: task.share_url });
             const parseResp = await fetch("/api/parse", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ url: task.share_url, sessdata: sessdata || null }),
+                body: JSON.stringify(payload),
                 signal: abortCtrl.signal,
             });
             const parseData = await parseResp.json();
@@ -3241,6 +3405,9 @@ function _dupSkipMessage(skip) {
 
 async function submitTasksToServerArchive(items, options = {}) {
     if (!items || !items.length) return false;
+
+    // 自动补齐已配置的平台鉴权凭证（B站 SESSDATA / Twitter auth_token）
+    items = items.map(item => attachAuthCredentials({ ...item }));
 
     // 归档目录里已有同名文件时先处理：单条弹窗、批量跳过。
     // 少了这一步，重复下载既没有任何提示、又会静默覆盖掉归档里的原文件
@@ -3848,9 +4015,7 @@ async function downloadPostItem(post, targetQuality = (window.currentBatchQualit
         showToast(`正在获取 [${safeTitle.slice(0, 12)}...] 高清媒体流...`, "info");
         try {
             const reqUrl = isBili ? `https://www.bilibili.com/video/${post.id}` : post.download_url;
-            const sessdata = getBiliSessdata();
-            const payload = { url: reqUrl };
-            if (sessdata) payload.sessdata = sessdata;
+            const payload = attachAuthCredentials({ url: reqUrl });
 
             const resp = await fetch("/api/parse", {
                 method: "POST",

@@ -110,6 +110,9 @@
                 <!-- B站专属感知助手条 (单作品模式) -->
                 <div id="biliHelperBar" class="bili-helper-bar" style="display: none;"></div>
 
+                <!-- Twitter / X 专属感知助手条 (单作品模式) -->
+                <div id="twitterHelperBar" class="bili-helper-bar" style="display: none;"></div>
+
                 <div class="action-row">
                     <button id="parseBtn" class="btn-primary btn-block">
                         <span class="btn-text">
@@ -266,6 +269,69 @@
                 <div style="display: flex; gap: 10px;">
                     <button class="btn-secondary-sm" id="cancelBiliModalBtn">取消</button>
                     <button class="btn-primary-sm" id="saveBiliModalBtn">保存并生效</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Twitter / X 凭证配置模态弹窗 -->
+    <div class="modal-overlay" id="twitterConfigModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fa-brands fa-x-twitter text-gradient"></i> Twitter / X 账号凭据设置
+                </div>
+                <button class="modal-close" id="closeTwitterModalBtn"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="bili-modal-tip">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span>部分推文包含<strong>敏感内容 (NSFW / 年龄限制)</strong> 或触发了 X 的访客限制，配置已登录账号的 <code>auth_token</code> 即可解锁解析与下载。</span>
+                </div>
+
+                <div class="form-group" style="margin-top: 16px;">
+                    <label class="form-label" for="twitterAuthTokenInput">
+                        <span>Twitter auth_token 凭证 <strong style="color: #ef4444;">*</strong></span>
+                        <a href="javascript:void(0)" id="toggleTwitterGuideBtn" class="link-cyan" style="font-size: 12px;">如何获取？</a>
+                    </label>
+                    <div class="input-with-action">
+                        <input type="password" id="twitterAuthTokenInput" class="form-input" placeholder="粘贴您的 Twitter auth_token (如: 2a8f9c...)">
+                        <button type="button" class="btn-toggle-eye" id="toggleTwitterAuthEyeBtn" title="查看/隐藏明文">
+                            <i class="fa-regular fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 14px;">
+                    <label class="form-label" for="twitterCt0Input">
+                        <span>Twitter ct0 (CSRF Token, 选填)</span>
+                    </label>
+                    <div class="input-with-action">
+                        <input type="password" id="twitterCt0Input" class="form-input" placeholder="选填，粘贴您的 ct0 值">
+                        <button type="button" class="btn-toggle-eye" id="toggleTwitterCt0EyeBtn" title="查看/隐藏明文">
+                            <i class="fa-regular fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 折叠教程 -->
+                <div class="bili-guide-box" id="twitterGuideBox" style="display: none;">
+                    <div class="guide-step"><strong>第 1 步：</strong>在电脑浏览器打开并登录 <a href="https://x.com" target="_blank" class="link-cyan">x.com</a>；</div>
+                    <div class="guide-step"><strong>第 2 步：</strong>按 <code>F12</code>（或右键“检查”），切换到 <code>Application (应用程序) -> Cookies -> https://x.com</code>；</div>
+                    <div class="guide-step"><strong>第 3 步：</strong>找到 <code>auth_token</code> 条目，复制其 Value 值粘贴到上方输入框保存即可。</div>
+                </div>
+                
+                <div class="bili-security-note">
+                    <i class="fa-solid fa-shield-halved"></i> 凭证保存在本地浏览器 LocalStorage 中，仅用于向官方接口发起带有登录态的解析请求。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-danger-ghost" id="clearTwitterModalBtn" title="清除已保存的凭证">
+                    <i class="fa-regular fa-trash-can"></i> 清除凭证
+                </button>
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn-secondary-sm" id="cancelTwitterModalBtn">取消</button>
+                    <button class="btn-primary-sm" id="saveTwitterModalBtn">保存并生效</button>
                 </div>
             </div>
         </div>

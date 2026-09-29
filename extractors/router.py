@@ -28,7 +28,13 @@ class UnifiedMediaRouter:
         match = re.search(r"https?://[a-zA-Z0-9.\-_/%\?&=#+:~]+", text)
         return match.group(0) if match else None
 
-    async def parse(self, text: str, sessdata: Optional[str] = None) -> MediaResponse:
+    async def parse(
+        self,
+        text: str,
+        sessdata: Optional[str] = None,
+        twitter_auth_token: Optional[str] = None,
+        twitter_ct0: Optional[str] = None,
+    ) -> MediaResponse:
         """核心路由与单作品解析入口"""
         url = self.clean_and_extract_url(text)
         if not url:
@@ -47,6 +53,10 @@ class UnifiedMediaRouter:
             if extractor.match(url):
                 if isinstance(extractor, BilibiliExtractor) and sessdata:
                     return await extractor.extract(url, sessdata=sessdata)
+                if isinstance(extractor, TwitterExtractor):
+                    return await extractor.extract(
+                        url, auth_token=twitter_auth_token, ct0=twitter_ct0
+                    )
                 return await extractor.extract(url)
 
         return MediaResponse(

@@ -9,6 +9,8 @@ build/
 develop-eggs/
 dist/
 downloads/
+config/
+*.tar
 eggs/
 .eggs/
 lib/

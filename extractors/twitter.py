@@ -518,22 +518,40 @@ class TwitterExtractor(BaseExtractor):
             avatar="",
         )
 
+        # 同理一律 int(... or 0)：yt-dlp 的计数字段可以是 None
         statistics = StatisticsInfo(
-            digg_count=data.get("like_count", 0),
-            comment_count=data.get("comment_count", 0),
-            share_count=data.get("repost_count", 0),
-            play_count=data.get("view_count", 0),
+            digg_count=int(data.get("like_count") or 0),
+            comment_count=int(data.get("comment_count") or 0),
+            share_count=int(data.get("repost_count") or 0),
+            play_count=int(data.get("view_count") or 0),
         )
 
         formats = data.get("formats", [])
-        mp4_formats = [f for f in formats if f.get("ext") == "mp4" and f.get("url")]
+        # 只保留**真的带视频轨**的 mp4。
+        #
+        # Twitter 把 HLS 音频轨也标成 ext=mp4（format_id 形如 hls-audio-128000-Audio），
+        # 且 width/height 是 None —— 混进来会让 QualityOption 校验直接抛
+        # ValidationError（用户看到的是 "2 validation errors for QualityOption"，
+        # 完全没法理解，也拿不到视频）。判据用 height 是否存在最稳：
+        #   · progressive http-*（vcodec=None，音视频复用）→ 有 height ✓
+        #   · 纯视频 hls-*（vcodec=avc1…）→ 有 height ✓
+        #   · 音频轨（vcodec="none"）→ 没有 height ✗
+        mp4_formats = [
+            f for f in formats
+            if f.get("ext") == "mp4" and f.get("url") and f.get("height")
+        ]
 
         def get_format_score(f: dict) -> int:
             h = f.get("height") or 0
             w = f.get("width") or 0
             tbr = f.get("tbr") or 0
             filesize = f.get("filesize") or f.get("filesize_approx") or 0
-            return max(w, h) * 100000000 + h * 1000000 + int(tbr * 1000) + int(filesize / 1024)
+            # 同一分辨率内优先选带音轨的（否则下下来是无声的）：
+            # acodec == "none" 是 yt-dlp 对"纯视频轨"的记号，
+            # progressive 复用流的 acodec 是 None（未知），算作有音轨。
+            has_audio = 0 if f.get("acodec") == "none" else 1
+            return (max(w, h) * 100000000 + h * 1000000 + int(tbr * 1000)
+                    + int(filesize / 1024) + has_audio * 500000000)
 
         mp4_formats.sort(key=get_format_score, reverse=True)
 
@@ -541,9 +559,11 @@ class TwitterExtractor(BaseExtractor):
         qualities: List[QualityOption] = []
         for f in mp4_formats:
             v_url = f.get("url", "")
-            height = f.get("height")
-            width = f.get("width")
-            filesize = f.get("filesize") or f.get("filesize_approx") or 0
+            # 一律取整成 0 兜底：yt-dlp 的字段可能是 None（模型里这几个是 int，
+            # 传 None 会直接抛 ValidationError），也可能是浮点
+            height = int(f.get("height") or 0)
+            width = int(f.get("width") or 0)
+            filesize = int(f.get("filesize") or f.get("filesize_approx") or 0)
             size_str = format_bytes(filesize)
             
             res_key = f"{height}p" if height else v_url
@@ -577,7 +597,8 @@ class TwitterExtractor(BaseExtractor):
             if src_u and src_u != best_video_url and src_u not in video_backup_urls:
                 video_backup_urls.append(src_u)
         cover = data.get("thumbnail", "")
-        duration = int(data.get("duration", 0))
+        # duration 可能是浮点（实测 8.508）或 None，都要能吃下
+        duration = int(data.get("duration") or 0)
 
         return MediaResponse(
             success=True,

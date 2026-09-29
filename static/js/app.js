@@ -128,6 +128,12 @@ function setTwitterCredentials(authToken, ct0) {
     } else {
         localStorage.removeItem("twitter_ct0");
     }
+    // 只填 auth_token 不填 ct0 是最常见的误区：解析走 X 的 GraphQL 接口，
+    // 请求头必须带 x-csrf-token，而它的值就是 ct0（由 yt-dlp 从 cookie 里取）。
+    // 缺了大概率仍然解析失败，这里提前说一句，省得用户以为是软件坏了。
+    if (authToken && authToken.trim() && !(ct0 || "").trim()) {
+        showToast("建议同时填写 ct0（CSRF Token），否则解析仍可能失败", "info", 5000);
+    }
     updateTwitterHelperBars();
 }
 
@@ -2763,7 +2769,11 @@ async function submitTaskToBackend(task) {
         }
 
         const payload = {
-            tasks: [{
+            // 这里的任务体也要过 attachAuthCredentials：桌面端单条下载走的是
+            // /api/local/download，后端在 direct_url 缺失（图集/分享链接/URL 过期重试）
+            // 时会**用它自己再解析一次**，那时需要 twitter_auth_token 才能拿到
+            // 需登录推文的媒体地址。此前这里只传了 sessdata，Twitter 凭据到不了后端。
+            tasks: [attachAuthCredentials({
                 task_id: task.id,
                 title: task.title || task.filename || "视频",
                 filename: task.filename || null,
@@ -2777,7 +2787,7 @@ async function submitTaskToBackend(task) {
                 platform: task.platform || "media",
                 page_num: task.pageNum || null,
                 sessdata: getBiliSessdata() || null,
-            }],
+            })],
         };
         const resp = await fetch("/api/local/download", {
             method: "POST",

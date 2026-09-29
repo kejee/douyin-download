@@ -16,6 +16,8 @@ import shutil
 import sys
 import tempfile
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
 
 APP_VERSION = "2.6.5.0"
@@ -85,8 +87,12 @@ a = Analysis(
         'pydantic',
         'httpx',
         'webview',
-        'yt_dlp',
-    ],
+    # yt-dlp 必须**整包收集**：它的提取器不是静态 import 的，而是由
+    # yt_dlp/extractor/lazy_extractors.py 通过 importlib 按需加载 ——
+    # 静态分析看不到它们，只写 'yt_dlp' 的话冻结后一调用就是
+    # "No suitable extractor found"。Twitter 的凭证通道与 B站的高清通道
+    # 都依赖它，静默失效过一次（B站有官方接口兜底所以没暴露）。
+    ] + collect_submodules('yt_dlp', on_error='ignore'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

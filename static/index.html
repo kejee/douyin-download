@@ -286,7 +286,7 @@
             <div class="modal-body">
                 <div class="bili-modal-tip">
                     <i class="fa-solid fa-circle-info"></i>
-                    <span>部分推文包含<strong>敏感内容 (NSFW / 年龄限制)</strong> 或触发了 X 的访客限制，配置已登录账号的 <code>auth_token</code> 即可解锁解析与下载。</span>
+                    <span>部分推文包含<strong>敏感内容 (NSFW / 年龄限制)</strong> 或触发了 X 的访客限制，配置已登录账号的 <code>auth_token</code> 与 <code>ct0</code> 两个值即可解锁解析与下载。</span>
                 </div>
 
                 <div class="form-group" style="margin-top: 16px;">
@@ -304,10 +304,10 @@
 
                 <div class="form-group" style="margin-top: 14px;">
                     <label class="form-label" for="twitterCt0Input">
-                        <span>Twitter ct0 (CSRF Token, 选填)</span>
+                        <span>Twitter ct0 (CSRF Token) <strong style="color: #ef4444;">*</strong></span>
                     </label>
                     <div class="input-with-action">
-                        <input type="password" id="twitterCt0Input" class="form-input" placeholder="选填，粘贴您的 ct0 值">
+                        <input type="password" id="twitterCt0Input" class="form-input" placeholder="粘贴您的 ct0 值（与 auth_token 来自同一个浏览器会话）">
                         <button type="button" class="btn-toggle-eye" id="toggleTwitterCt0EyeBtn" title="查看/隐藏明文">
                             <i class="fa-regular fa-eye"></i>
                         </button>
@@ -318,7 +318,8 @@
                 <div class="bili-guide-box" id="twitterGuideBox" style="display: none;">
                     <div class="guide-step"><strong>第 1 步：</strong>在电脑浏览器打开并登录 <a href="https://x.com" target="_blank" class="link-cyan">x.com</a>；</div>
                     <div class="guide-step"><strong>第 2 步：</strong>按 <code>F12</code>（或右键“检查”），切换到 <code>Application (应用程序) -> Cookies -> https://x.com</code>；</div>
-                    <div class="guide-step"><strong>第 3 步：</strong>找到 <code>auth_token</code> 条目，复制其 Value 值粘贴到上方输入框保存即可。</div>
+                    <div class="guide-step"><strong>第 3 步：</strong>在同一份 Cookie 列表里找到 <code>auth_token</code> 与 <code>ct0</code> <strong>两个</strong>条目，分别复制其 Value 值粘贴到上方两个输入框（两者必须来自同一浏览器会话）。</div>
+                    <div class="guide-step" style="color: var(--text-dim);">为什么两个都要：解析走的是 X 的 GraphQL 接口，请求头里必须带 <code>x-csrf-token</code>，而它的值就是 <code>ct0</code>；只填 auth_token 通常仍会被拒。</div>
                 </div>
                 
                 <div class="bili-security-note">

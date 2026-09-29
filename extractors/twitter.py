@@ -1,6 +1,5 @@
 import re
 import os
-import json
 import asyncio
 import logging
 import tempfile
@@ -21,6 +20,31 @@ TWITTER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
+
+
+class _YTDLPLogger:
+    """把 yt-dlp 的日志转发到本项目 logger。
+
+    必须显式接管输出：打包成 windowed app（desktop.spec 里 console=False）后
+    sys.stderr / sys.stdout 可能是 None，yt-dlp 的默认 logger 直接往流里写会抛异常。
+    这里刻意用 debug 级别承接 info/warning —— 正常解析不该往用户日志里倒 yt-dlp 的
+    每行输出，只有 error 提到 warning 便于排障。
+    """
+
+    def debug(self, msg):
+        logger.debug(msg)
+
+    def info(self, msg):
+        logger.debug(msg)
+
+    def warning(self, msg):
+        logger.debug(msg)
+
+    def error(self, msg):
+        logger.warning(f"[yt-dlp] {msg}")
+
+
+_YTDLP_LOGGER = _YTDLPLogger()
 
 def format_bytes(size_bytes: int) -> str:
     """格式化字节大小为可读字符串"""
@@ -111,14 +135,22 @@ class TwitterExtractor(BaseExtractor):
             )
 
         # 1. 优先通道 A: 尝试通过官方 Syndication API / 开放接口获取（匿名极速）
+        fallback: Optional[MediaResponse] = None
         try:
             res = await self._extract_via_api(tweet_id)
             if res and res.success:
-                return res
-        except Exception:
-            pass
+                # 纯文本结果先不全信：敏感内容的推文在这个接口里可能**只回文本、
+                # 把媒体字段整个剥掉**，直接返回文本卡片会让用户以为
+                # "解析成功了但没有视频"。配了凭证就继续走通道 B 试一次，
+                # B 也拿不到才回落这张文本卡片（普通纯文本推文行为不变）。
+                if res.type == "text" and auth_token:
+                    fallback = res
+                else:
+                    return res
+        except Exception as e:
+            logger.debug(f"[{tweet_id}] syndication 通道无结果: {e}")
 
-        # 2. 坚固兜底通道 B: 调用 yt-dlp（支持凭证解锁敏感/需登录推文）
+        # 2. 坚固兜底通道 B: 内置 yt-dlp 库（支持凭证解锁敏感/需登录推文）
         try:
             res_ytdlp = await self._extract_via_ytdlp(
                 real_url or url, tweet_id, auth_token=auth_token, ct0=ct0
@@ -126,6 +158,9 @@ class TwitterExtractor(BaseExtractor):
             if res_ytdlp and res_ytdlp.success:
                 return res_ytdlp
         except Exception as e:
+            logger.warning(f"[{tweet_id}] Twitter 凭证通道失败: {e}")
+            if fallback is not None:
+                return fallback
             return MediaResponse(
                 success=False,
                 platform="twitter",
@@ -137,6 +172,9 @@ class TwitterExtractor(BaseExtractor):
                 statistics=StatisticsInfo(),
                 error=f"解析 Twitter 推文失败: {str(e)}",
             )
+
+        if fallback is not None:
+            return fallback
 
         err_msg = (
             "无法获取该推文媒体内容（推文可能已删除、设为私密或当前 Twitter 凭证已失效）"
@@ -350,6 +388,57 @@ class TwitterExtractor(BaseExtractor):
 
         return None
 
+    @staticmethod
+    def _translate_ytdlp_error(err_text: str) -> str:
+        """把 yt-dlp 的英文报错翻译成可操作的中文提示
+
+        顺序有讲究：先判最能定位问题的（锁推 / 敏感内容 / 限流 / 凭证失效），
+        都不匹配再原样回传（截断），别把 yt-dlp 的原始信息吃掉 —— 排障时它最有用。
+        """
+        low = (err_text or "").lower()
+        if "private tweet" in low or "protected" in low:
+            return "该推文为私密推文（锁推），需要推主互关/授权方可查看"
+        if "age-restricted" in low or "nsfw" in low or "sensitive" in low:
+            return "该推文含成人/敏感内容，您的 Twitter 账号设置中需开启「允许显示敏感内容」"
+        if "rate limit" in low or "too many requests" in low:
+            return "Twitter 接口访问受限 (Rate Limit)，请稍候再试"
+        if any(k in low for k in ("login", "unauthorized", "401", "could not authenticate")):
+            return "Twitter 提示凭证已过期或无效：请重新登录 x.com，从 Cookie 里复制最新的 auth_token 与 ct0"
+        if "no video could be found" in low or "no media" in low:
+            return "该推文里没有可下载的视频或图片"
+        clean = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?", "", (err_text or "").strip())
+        clean = re.sub(r"\s+", " ", clean)
+        return f"Twitter 提取失败: {clean[:300]}"
+
+    def _write_twitter_cookie_file(self, auth_token: str, ct0: Optional[str]) -> str:
+        """把 auth_token / ct0 写成 yt-dlp 认的 Netscape cookie 文件，返回路径。
+
+        两个必须遵守的硬约束（各踩过一次）：
+
+        1. **域名必须覆盖 api.x.com**：yt-dlp 的 TwitterBaseIE._API_BASE 就是
+           https://api.x.com/1.1/，它用 _get_cookies(该 URL) 取 auth_token 判断
+           "是否已登录"、并取 ct0 当 x-csrf-token。只写 .twitter.com 时
+           api.x.com 匹配不上 → 判定为未登录 → 敏感内容/需登录推文照样拿不到。
+        2. **域名与"包含子域"标记必须一致**：Netscape 格式里带前导点的域名
+           （`.x.com`）子域标记才能是 TRUE，无点的（`x.com`）只能是 FALSE。
+           写成 `api.x.com\tTRUE\t...` 会被 cookie 解析器判为非法行，
+           整份文件直接加载失败（报 "invalid Netscape format cookies file"），
+           结果是**一个 cookie 都没生效**。
+
+        所以这里只写带点的两个根域：`.x.com` 与 `.twitter.com` 都能匹配到
+        各自的子域（api.x.com / api.twitter.com），既合法又够用。
+        """
+        domains = [".x.com", ".twitter.com"]
+        cookie_lines = ["# Netscape HTTP Cookie File"]
+        for dom in domains:
+            cookie_lines.append(f"{dom}\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}")
+            if ct0:
+                cookie_lines.append(f"{dom}\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
+        fd, path = tempfile.mkstemp(prefix="tw_cookie_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(cookie_lines) + "\n")
+        return path
+
     async def _extract_via_ytdlp(
         self,
         url: str,
@@ -357,68 +446,60 @@ class TwitterExtractor(BaseExtractor):
         auth_token: Optional[str] = None,
         ct0: Optional[str] = None,
     ) -> Optional[MediaResponse]:
-        """通过 yt-dlp 引擎提取（支持 Netscape Cookie 鉴权与详细错误探测）"""
+        """通过**内置的 yt-dlp Python 库**提取（凭证可解锁需登录/敏感内容推文）
+
+        为什么必须是库、不能是 `yt-dlp` 命令行：打包成 .app 之后进程里根本没有
+        `yt-dlp` 这个可执行文件（desktop.spec 只把 yt_dlp 作为 Python 模块收进去，
+        它也不是 PATH 上的命令）。旧实现 create_subprocess_exec("yt-dlp", ...)
+        会直接抛 FileNotFoundError，被外层 catch 成
+        "解析 Twitter 推文失败: [Errno 2] No such file or directory: 'yt-dlp'"
+        —— 于是**配了凭证也永远解析失败**。项目里 bilibili 的 yt-dlp 通道一直是
+        按库调用的（extractors/bilibili.py），这里统一成同一种用法。
+
+        鉴权只需要 cookie 文件：yt-dlp 的 TwitterBaseIE._set_base_headers() 会自己
+        从 cookie 里取 auth_token / ct0 组装 Authorization 与 x-csrf-token，
+        而它的 _API_BASE 是 https://api.x.com/1.1/ —— 所以 cookie 域名必须覆盖
+        api.x.com（下面 domains 里已包含）。**不要**再手动注入那两个头：
+        手写的 bearer 是写死的旧值，只会和 yt-dlp 自己的鉴权打架。
+        """
         temp_cookie_path = None
-        cmd = [
-            "yt-dlp",
-            "-j",
-            "--no-warnings",
-            "--no-check-certificates",
-            "--socket-timeout", "20",
-        ]
+        try:
+            import yt_dlp
+        except ImportError as e:      # 理论上不会（requirements.txt 里有 yt-dlp）
+            logger.warning(f"[{tweet_id}] yt-dlp 库不可用: {e}")
+            return None
+
+        opts: Dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "nocheckcertificate": True,
+            "noplaylist": True,
+            "socket_timeout": 20,
+            "logger": _YTDLP_LOGGER,
+        }
 
         try:
             if auth_token:
-                domains = [".twitter.com", ".x.com", "api.twitter.com", "api.x.com", "twitter.com", "x.com"]
-                cookie_lines = ["# Netscape HTTP Cookie File"]
-                for dom in domains:
-                    cookie_lines.append(f"{dom}\tTRUE\t/\tTRUE\t2147483647\tauth_token\t{auth_token}")
-                    if ct0:
-                        cookie_lines.append(f"{dom}\tTRUE\t/\tTRUE\t2147483647\tct0\t{ct0}")
-
-                fd, temp_cookie_path = tempfile.mkstemp(prefix="tw_cookie_", suffix=".txt")
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write("\n".join(cookie_lines) + "\n")
-
-                cmd.extend(["--cookies", temp_cookie_path])
-                if ct0:
-                    cmd.extend(["--add-header", f"x-csrf-token:{ct0}"])
-                cmd.extend(["--add-header", f"authorization:Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"])
-                cmd.extend(["--user-agent", TWITTER_UA])
-                cmd.extend(["--referer", "https://x.com/"])
-
-            cmd.append(url)
+                temp_cookie_path = self._write_twitter_cookie_file(auth_token, ct0)
+                opts["cookiefile"] = temp_cookie_path
 
             if self.proxy:
-                cmd.extend(["--proxy", self.proxy])
+                opts["proxy"] = self.proxy
 
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            err_text = (stderr.decode("utf-8", errors="ignore") if stderr else "").strip()
+            def _run() -> Dict[str, Any]:
+                # 只解析不下载：拿到 info dict 由下面统一映射成 MediaResponse
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(url, download=False) or {}
 
-            if process.returncode != 0 or not stdout:
-                if err_text:
-                    logger.warning(f"[{tweet_id}] yt-dlp Twitter 提取日志: {err_text}")
-                    # 匹配精准错误原因
-                    if "Private tweet" in err_text or "protected" in err_text.lower():
-                        raise ValueError("该推文为私密推文（锁推），需要推主互关/授权方可查看")
-                    if "age-restricted" in err_text.lower() or "nsfw" in err_text.lower():
-                        raise ValueError("该推文含成人/敏感内容，您的 Twitter 账号设置中需开启「允许显示敏感内容」")
-                    if "rate limit" in err_text.lower():
-                        raise ValueError("Twitter 接口访问受限 (Rate Limit)，请稍候再试")
-                    if "login" in err_text.lower() or "unauthorized" in err_text.lower():
-                        raise ValueError("Twitter 提示凭证已过期或无效，请重新登录 x.com 复制最新的 auth_token")
-                    
-                    # 提取 ERROR 行反馈给用户
-                    first_err = [line for line in err_text.splitlines() if "ERROR:" in line]
-                    if first_err:
-                        clean_err = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?", "", first_err[0])
-                        raise ValueError(f"Twitter 提取失败: {clean_err}")
-                return None
+            # yt-dlp 是同步阻塞的，丢到线程里跑，别把事件循环（和 SSE 推送）占住
+            data = await asyncio.to_thread(_run)
+        except yt_dlp.utils.DownloadError as e:
+            err_text = str(e)
+            logger.warning(f"[{tweet_id}] yt-dlp Twitter 提取失败: {err_text}")
+            raise ValueError(self._translate_ytdlp_error(err_text))
+        except Exception as e:
+            logger.warning(f"[{tweet_id}] yt-dlp 调用异常: {type(e).__name__}: {e}")
+            raise ValueError(f"Twitter 提取失败: {type(e).__name__}: {e}")
         finally:
             if temp_cookie_path and os.path.exists(temp_cookie_path):
                 try:
@@ -426,7 +507,6 @@ class TwitterExtractor(BaseExtractor):
                 except Exception:
                     pass
 
-        data = json.loads(stdout.decode('utf-8'))
         title = data.get("title") or data.get("description") or "Twitter 视频"
         clean_title = re.sub(r'https://t\.co/\w+', '', title).strip()
 

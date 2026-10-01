@@ -16,8 +16,9 @@ import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url
+from downloader import proxy_config
 
-APP_VERSION = "2.6.5.0"
+APP_VERSION = "2.6.6.0"
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,25 @@ async def index():
         return FileResponse(index_file)
     return HTMLResponse("<h1>多平台解析服务运行中，请检查前端静态资源文件。</h1>")
 
+@app.on_event("startup")
+async def _init_proxy_config():
+    """启动时落一份 `proxy.env` 模板并加载它。
+
+    模板内容全是注释，所以"文件存在但没有配置值"是正常状态，
+    不会覆盖 compose 里的环境变量。
+    """
+    try:
+        created = proxy_config.ensure_template()
+        state = proxy_config.reload(force=True)
+        logger.info(
+            "代理配置：来源=%s 生效=%s%s",
+            state.get("source"), state.get("active"),
+            "（已生成配置文件模板）" if created else "",
+        )
+    except Exception as exc:      # 配置问题绝不能让服务起不来
+        logger.warning("加载代理配置失败：%s", exc)
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "douyin-download", "version": APP_VERSION}
@@ -72,7 +92,11 @@ async def parse_media(req: ParseRequest):
     """解析抖音、小红书、快手、皮皮虾、B站、Twitter等多平台单作品分享链接"""
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="请输入有效的分享链接或文案")
-    
+
+    # 代理可能刚被改过（用户在 NAS 上编辑了 proxy.env），提交前重读一次：
+    # 按 mtime 缓存，没变时几乎零成本
+    proxy_config.reload()
+
     result = await router.parse(
         req.url.strip(),
         sessdata=req.sessdata,
@@ -324,10 +348,22 @@ def _batch_meta(items: List[ServerDownloadItem]) -> tuple:
     return f"b_{int(time.time() * 1000)}_{_batch_seq}", title
 
 
+def _config_with_proxy() -> dict:
+    """服务端配置 + 代理状态。
+
+    代理状态里带 `source`（file / env / none）与配置文件路径 ——
+    用户最需要的正是"我到底改的哪个生效了"，光看一个地址看不出来。
+    网页每次加载都会拉这个接口，所以顺便在这里重读一次 proxy.env：
+    这样"在 NAS 上改完文件 → 刷新页面"就是完整的生效路径，不用重建容器。
+    """
+    proxy_state = proxy_config.reload()
+    return {**server_downloader.get_config(), "proxy": proxy_state}
+
+
 @app.get("/api/server/config")
 async def get_server_config():
-    """获取服务端/NAS 存储配置"""
-    return server_downloader.get_config()
+    """获取服务端/NAS 存储配置（含代理来源与生效状态）"""
+    return _config_with_proxy()
 
 class ServerDirRequest(BaseModel):
     download_dir: str
@@ -346,7 +382,7 @@ async def set_server_config(req: ServerDirRequest):
     ok, message, persistent = server_downloader.set_server_dir(req.download_dir)
     if not ok:
         raise HTTPException(status_code=400, detail=message)
-    config = server_downloader.get_config()
+    config = _config_with_proxy()
     return {
         "success": True,
         "persistent": persistent,
@@ -361,6 +397,7 @@ async def create_server_downloads(req: ServerBatchDownloadRequest, request: Requ
     skipped: List[dict] = []
     batch_id, batch_title = _batch_meta(req.tasks)
     client_id = _client_id(request)
+    proxy_config.reload()      # 取最新代理（改过 proxy.env 后不必重启容器）
     for item in req.tasks:
         try:
             task = server_downloader.add_task(
@@ -709,6 +746,7 @@ async def create_local_downloads(req: ServerBatchDownloadRequest, request: Reque
     # 桌面端只有一个用户，标识在这里没有隔离价值；照样记下来是为了让历史条目
     # 与 NAS 走同一套结构（同一个 history.json 格式、同一套过滤规则）。
     client_id = _client_id(request)
+    proxy_config.reload()      # 同服务端通道：提交前取最新代理
     for item in req.tasks:
         try:
             task = server_downloader.add_task(

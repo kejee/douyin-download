@@ -88,8 +88,12 @@ services:
       # 取值：浏览器登录 bilibili.com → F12 → Application → Cookies → 复制 SESSDATA。
       # 注意：某个浏览器若在网页界面里单独设过，会**覆盖**这里的值（优先级更高）。
       - SESSDATA=
-      # 可选：解析 YouTube / Twitter 需要代理（填你局域网内的代理地址，
-      #       不是 127.0.0.1 —— 容器里的 127.0.0.1 是容器自己）
+      # 可选：解析 YouTube / Twitter 需要代理。
+      # ★ 更推荐：不改这里，而是在挂载的 config 目录里建 proxy.env
+      #   （容器内路径 /config/proxy.env，启动时会自动生成注释模板）。
+      #   它的**优先级高于下面两行**，改完刷新网页即生效，不用重建容器。
+      # 直接写在这里也可以，但改完要 `up -d --force-recreate` 才生效。
+      # 两种写法都要填**局域网**地址，不是 127.0.0.1 —— 容器里的 127.0.0.1 是容器自己。
       # - HTTP_PROXY=http://192.168.1.2:7890
       # - HTTPS_PROXY=http://192.168.1.2:7890
     healthcheck:

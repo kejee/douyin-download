@@ -8,9 +8,9 @@
     <meta name="description" content="免费、快速、开源的多平台短视频与图集在线解析下载工具，支持抖音、小红书、快手、皮皮虾、B站 (Bilibili)、TikTok等无水印/高清视频下载、原声音频提取及高清图集批量下载。">
     <meta name="referrer" content="no-referrer">
     <!-- 字体与图标全部本地化：离线 / 网络受限环境下界面不丢图标 -->
-    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.6.5.0">
-    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.6.5.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.6.5.0">
+    <link rel="stylesheet" href="/static/vendor/fonts/outfit.css?v=2.6.6.0">
+    <link rel="stylesheet" href="/static/vendor/fontawesome/css/all.min.css?v=2.6.6.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=2.6.6.0">
 </head>
 
 <body>
@@ -217,7 +217,7 @@
                     <span>© 2026 Universal Downloader · 开源于 GitHub · 遵循 MIT 许可协议</span>
                 </div>
                 <div class="footer-version">
-                    <span class="badge badge-version">v2.6.5.0</span>
+                    <span class="badge badge-version">v2.6.6.0</span>
                 </div>
             </div>
         </footer>
@@ -410,6 +410,29 @@
                 <input type="text" id="serverDirInput" class="form-input" spellcheck="false"
                        placeholder="/downloads">
                 <p class="dup-file-hint" id="serverDirHint"></p>
+
+                <!-- 代理状态：只读展示。真正的配置在挂载目录里的 proxy.env，
+                     用户用 File Station 改一行、刷新页面即可，不必重建容器。 -->
+                <div class="proxy-box">
+                    <div class="proxy-box-head">
+                        <i class="fa-solid fa-globe"></i>
+                        <span>网络代理</span>
+                        <span class="proxy-badge" id="proxyBadge">检测中…</span>
+                    </div>
+                    <div class="proxy-box-line" id="proxyCurrentText">—</div>
+                    <div class="proxy-box-path">
+                        配置文件：<code id="proxyFilePath">/config/proxy.env</code>
+                        <button class="proxy-copy-btn" id="proxyCopyBtn" type="button"
+                                title="复制路径">
+                            <i class="fa-regular fa-copy"></i>
+                        </button>
+                    </div>
+                    <div class="proxy-box-note">
+                        该文件<strong>优先级高于</strong> compose 里的环境变量；改完刷新本页即生效，无需重建容器。
+                        文件不存在或未填写时，自动沿用 compose 的设置。
+                    </div>
+                    <div class="proxy-box-warn" id="proxyWarnText" style="display: none;"></div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary-sm" id="serverDirResetBtn">
@@ -523,7 +546,7 @@
     <!-- Toast 提示容器 -->
     <div id="toastContainer" class="toast-container"></div>
 
-    <script src="/static/js/app.js?v=2.6.5.0"></script>
+    <script src="/static/js/app.js?v=2.6.6.0"></script>
 </body>
 
 </html>

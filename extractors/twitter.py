@@ -68,8 +68,20 @@ class TwitterExtractor(BaseExtractor):
             "Referer": "https://twitter.com/",
             "Accept": "*/*",
         }
-        # 支持从环境变量获取代理配置
-        self.proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+
+    @property
+    def proxy(self) -> Optional[str]:
+        """当前生效的代理，**每次用的时候现读**。
+
+        router 里的提取器是常驻实例（进程生命周期内只 new 一次），
+        如果在 __init__ 里把环境变量拷成实例属性，那么用户在 NAS 上改完
+        `proxy.env` 也不会生效 —— 会一直用启动那一刻的旧值。
+        这里每次现读，配合 proxy_config.reload() 就能做到"改文件即生效"。
+        """
+        # 延迟导入：downloader 包的 __init__ 会 import server_downloader，
+        # 在模块顶层导入有循环风险，放到属性里调用时再导（模块有缓存，不贵）。
+        from downloader import proxy_config
+        return proxy_config.active_proxy()
 
     def match(self, url: str) -> bool:
         """匹配 Twitter / X 域名"""

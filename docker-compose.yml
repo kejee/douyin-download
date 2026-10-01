@@ -50,7 +50,12 @@ services:
       # ── 可选：Twitter / X auth_token（解锁敏感内容 / 需登录推文）──
       # - TWITTER_AUTH_TOKEN=
       # - TWITTER_CT0=
-      # 可选：解析 YouTube / Twitter 需要代理
+      # 可选：解析 YouTube / Twitter 需要代理。
+      # 优先推荐**不改这里**，而是在挂载的 config 目录里建一个 proxy.env
+      # （容器内路径 /config/proxy.env）：那个文件的优先级更高，
+      # 改完刷新网页即生效，**不用重建容器**。写法见该文件里的注释。
+      # 直接写在这里也可以，但要记住：改完必须 `up -d --force-recreate` 才生效。
+      # 必须填**局域网**地址，不能填 127.0.0.1（容器里的 127.0.0.1 是容器自己）。
       # - HTTP_PROXY=http://192.168.1.2:7890
       # - HTTPS_PROXY=http://192.168.1.2:7890
     healthcheck:

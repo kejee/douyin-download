@@ -1492,7 +1492,66 @@ function openServerDirEditor() {
     input.value = (window.serverConfig && window.serverConfig.server_dir) || "";
     if (hint) hint.textContent = "";
     modal.classList.add("active");
+    // 打开时重拉一次配置：后端会顺手重读挂载目录里的 proxy.env，
+    // 所以「改文件 → 打开这个弹窗」就能立刻看到新代理，不用重启容器。
+    refreshProxyStatus();
     setTimeout(() => { try { input.focus(); input.select(); } catch (e) {} }, 50);
+}
+
+// 代理状态：只读展示（真正的配置在挂载目录的 proxy.env 里）
+function renderProxyStatus(proxy) {
+    const p = proxy || {};
+    const badge = document.getElementById("proxyBadge");
+    const cur = document.getElementById("proxyCurrentText");
+    const pathEl = document.getElementById("proxyFilePath");
+    const warnEl = document.getElementById("proxyWarnText");
+
+    if (pathEl && p.file) pathEl.textContent = p.file;
+
+    const labels = { file: "来自配置文件", env: "来自 compose", none: "未配置" };
+    if (badge) {
+        badge.textContent = labels[p.source] || "未配置";
+        badge.className = "proxy-badge"
+            + (p.source === "file" ? " is-file" : (p.source === "env" ? " is-env" : ""));
+    }
+
+    if (cur) {
+        const rows = [];
+        if (p.http) rows.push(`http：<code>${escapeHtml(p.http)}</code>`);
+        if (p.https && p.https !== p.http) rows.push(`https：<code>${escapeHtml(p.https)}</code>`);
+        if (p.no_proxy) rows.push(`不走代理：<code>${escapeHtml(p.no_proxy)}</code>`);
+        if (rows.length) {
+            cur.innerHTML = rows.join("<br>");
+        } else if (p.file_exists) {
+            cur.textContent = "当前没有配置代理。配置文件已存在但里面没填地址 —— 写上代理地址保存后，刷新本页即生效。";
+        } else {
+            cur.textContent = "当前没有配置代理。";
+        }
+    }
+
+    if (warnEl) {
+        const warnings = p.warnings || [];
+        if (warnings.length) {
+            warnEl.style.display = "block";
+            warnEl.textContent = "配置文件提示：" + warnings.join("；");
+        } else {
+            warnEl.style.display = "none";
+            warnEl.textContent = "";
+        }
+    }
+}
+
+// 重拉配置（后端会顺带重读 proxy.env），刷新代理卡片
+async function refreshProxyStatus() {
+    try {
+        const resp = await fetch("/api/server/config");
+        if (!resp.ok) return;
+        const cfg = await resp.json();
+        window.serverConfig = Object.assign({}, window.serverConfig || {}, cfg);
+        renderProxyStatus(cfg.proxy);
+    } catch (e) {
+        console.warn("获取代理状态失败:", e);
+    }
 }
 
 function closeServerDirEditor() {
@@ -1557,6 +1616,25 @@ function resetServerDir() {
     if (closeBtn) closeBtn.addEventListener("click", closeServerDirEditor);
     if (saveBtn) saveBtn.addEventListener("click", () => saveServerDir());
     if (resetBtn) resetBtn.addEventListener("click", resetServerDir);
+    const copyBtn = document.getElementById("proxyCopyBtn");
+    if (copyBtn) {
+        copyBtn.addEventListener("click", async () => {
+            const text = (document.getElementById("proxyFilePath") || {}).textContent || "";
+            if (!text) return;
+            try {
+                await navigator.clipboard.writeText(text.trim());
+                showToast("路径已复制", "success");
+            } catch (e) {
+                // http 页面下剪贴板 API 不可用：把路径选中，让用户手动复制
+                const range = document.createRange();
+                range.selectNodeContents(document.getElementById("proxyFilePath"));
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                showToast("无法访问剪贴板，已选中路径请手动复制", "info");
+            }
+        });
+    }
     if (input) {
         input.addEventListener("keydown", (e) => {
             if (e.key === "Enter") { e.preventDefault(); saveServerDir(); }
@@ -1840,6 +1918,9 @@ async function initServerArchiving() {
             const cfg = await resp.json();
             window.serverConfig = cfg;
             window.isDesktop = !!cfg.is_desktop;
+            // 代理状态随这次请求返回（后端会顺带重读 proxy.env），
+            // 所以"刷新页面"本身就完成了代理配置的重新加载
+            renderProxyStatus(cfg.proxy);
             const tipEl = document.getElementById("destPathTip");
             if (tipEl && cfg.download_dir) {
                 setDestPathLabel(cfg.download_dir);

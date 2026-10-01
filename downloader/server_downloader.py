@@ -25,6 +25,7 @@ from downloader.paths import (
 )
 from downloader.history import delete_history, record_history
 from downloader.http_util import bilibili_cookie, download_headers
+from downloader import proxy_config
 from downloader.preview import preview_dir
 from extractors.media_urls import build_download_candidates, host_of
 
@@ -924,7 +925,12 @@ class ServerDownloadManager:
             request_headers["Range"] = f"bytes={resume_offset}-"
 
         timeout = httpx.Timeout(120.0, connect=10.0)
-        async with httpx.AsyncClient(headers=request_headers, timeout=timeout, follow_redirects=True) as client:
+        # 媒体直链同样**按平台**决定要不要走代理：限定平台时（PROXY_PLATFORMS）
+        # 代理不在环境变量里，完全靠这里显式传入 —— 漏了这一步，
+        # Twitter 的视频在需要代理的网络里就会「解析得到、下载不动」。
+        proxy = proxy_config.proxy_for(getattr(task, "platform", ""))
+        async with httpx.AsyncClient(headers=request_headers, timeout=timeout,
+                                     follow_redirects=True, proxy=proxy) as client:
             async with client.stream("GET", url) as resp:
                 if resp.status_code == 416:
                     # 请求范围超出文件长度：分片已经到头了，视为完成

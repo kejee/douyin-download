@@ -28,6 +28,21 @@ BILIBILI_DESKTOP_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
+
+def _proxy_for_bilibili() -> Optional[str]:
+    """B站这条通道该用的代理；None = 直连。
+
+    不能直接读 `os.getenv("HTTP_PROXY")`：代理可能被限定成"只有某几个平台走"
+    （proxy.env 里的 PROXY_PLATFORMS），那种情况下环境变量里**没有**代理，
+    必须按平台名显式取用。
+    """
+    try:
+        from downloader import proxy_config
+        return proxy_config.proxy_for("bilibili")
+    except Exception:          # 配置模块不可用时，退回"不代理"而不是让解析失败
+        return None
+
+
 QUALITY_MAP = {
     127: "8K 超高清",
     120: "4K 超清",
@@ -129,8 +144,7 @@ class BilibiliExtractor(BaseExtractor):
         if not yt_dlp:
             return None
         try:
-            import os
-            proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+            proxy = _proxy_for_bilibili()
             http_headers = {
                 "User-Agent": BILIBILI_DESKTOP_UA,
                 "Referer": "https://www.bilibili.com/",
@@ -531,8 +545,7 @@ class BilibiliExtractor(BaseExtractor):
         if not yt_dlp:
             return []
         try:
-            import os
-            proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+            proxy = _proxy_for_bilibili()
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,

@@ -20,7 +20,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
-APP_VERSION = "2.6.6.0"
+APP_VERSION = "2.6.7.0"
 
 FFMPEG_EXE_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 

@@ -75,6 +75,10 @@ services:
       #   （NAS 上的路径 /share/CACHEDEV2_DATA/Webs/universal-downloader/config/proxy.env）。
       #   容器启动时会自动生成这个文件的注释模板。它的**优先级高于下面两行**，
       #   改完刷新网页即生效，**不用重建容器、也不会打断正在排队的任务**。
+      #   ★ 只让部分平台走代理（例如只让 Twitter）：在 proxy.env 里加一行
+      #       PROXY_PLATFORMS=twitter
+      #     其余平台（抖音 / B站 / 小红书 / 快手）自动直连。
+      #     ⚠️ 下面这两行环境变量做不到这件事 —— 环境变量是全局的，一设就全走代理。
       # 直接写在这里也可以，但改完必须 `up -d --force-recreate` 才生效。
       # 两种写法都必须填**局域网**地址，不能填 127.0.0.1（容器里的 127.0.0.1 是容器自己）。
       # - HTTP_PROXY=http://192.168.1.2:7890

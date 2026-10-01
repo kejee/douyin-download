@@ -15,17 +15,26 @@ DESKTOP_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
-# 各平台 CDN 防盗链所需的 Referer
+# 各平台 CDN 防盗链所需的 Referer，以及该域名归属的**平台标识**。
+# 平台名与各 extractor 返回的 `platform` 字段一致（bilibili / douyin / xhs /
+# kuaishou / pipixia / twitter），"哪些平台走代理"就是按这个标识来匹配的。
+# 三件事（Referer、平台归属、代理是否启用）**共用这一张表**：
+# 分散成两份迟早会不一致 —— 那正是本项目「重复下载没提示」的根因。
 _REFERER_RULES = (
-    (("xhscdn.com", "xiaohongshu.com"), "https://www.xiaohongshu.com/"),
-    (("kuaishou.com", "gifshow.com", "yximgs.com"), "https://www.kuaishou.com/"),
-    (("pipix.com", "snssdk.com"), "https://h5.pipix.com/"),
+    (("xhscdn.com", "xiaohongshu.com"), "https://www.xiaohongshu.com/", "xhs"),
+    (("kuaishou.com", "gifshow.com", "yximgs.com"), "https://www.kuaishou.com/", "kuaishou"),
+    (("pipix.com", "snssdk.com"), "https://h5.pipix.com/", "pipixia"),
     (
         ("bilibili.com", "bilivideo.cn", "bilivideo.com", "hdslb.com"),
         "https://www.bilibili.com/",
+        "bilibili",
     ),
-    (("twimg.com", "twitter.com", "x.com"), "https://twitter.com/"),
-    (("douyin.com", "douyinpic.com", "douyinstatic.com", "douyinvod.com"), "https://www.douyin.com/"),
+    (("twimg.com", "twitter.com", "x.com"), "https://twitter.com/", "twitter"),
+    (
+        ("douyin.com", "douyinpic.com", "douyinstatic.com", "douyinvod.com"),
+        "https://www.douyin.com/",
+        "douyin",
+    ),
 )
 
 
@@ -34,10 +43,25 @@ def referer_for_url(url: str) -> str:
     if not url:
         return "https://www.douyin.com/"
     lowered = url.lower()
-    for domains, referer in _REFERER_RULES:
+    for domains, referer, _platform in _REFERER_RULES:
         if any(d in lowered for d in domains):
             return referer
     return "https://www.douyin.com/"
+
+
+def platform_for_url(url: str, default: str = "media") -> str:
+    """按媒体直链的域名推断它属于哪个平台，认不出时返回 default。
+
+    用途：**下载/预览阶段手里只有一条 CDN 直链**（没有解析结果），
+    但"哪些平台走代理"需要知道平台 —— 例如 video.twimg.com 要认成 twitter。
+    """
+    if not url:
+        return default
+    lowered = url.lower()
+    for domains, _referer, platform in _REFERER_RULES:
+        if any(d in lowered for d in domains):
+            return platform
+    return default
 
 
 def bilibili_cookie(sessdata: Optional[str] = None) -> str:

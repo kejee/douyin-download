@@ -1517,6 +1517,15 @@ function renderProxyStatus(proxy) {
 
     if (cur) {
         const rows = [];
+        // 作用范围放最前：用户最容易搞不清的就是"我配的代理到底管了哪些平台"
+        if (p.scope === "selected") {
+            const list = p.platforms || [];
+            rows.push(list.length
+                ? `只对这些平台生效：<code>${escapeHtml(list.join(" / "))}</code>（其余平台直连）`
+                : "作用范围：指定了平台但一个都没匹配上，等同于没有代理");
+        } else if (p.http || p.https) {
+            rows.push("作用范围：<code>所有平台</code>");
+        }
         if (p.http) rows.push(`http：<code>${escapeHtml(p.http)}</code>`);
         if (p.https && p.https !== p.http) rows.push(`https：<code>${escapeHtml(p.https)}</code>`);
         if (p.no_proxy) rows.push(`不走代理：<code>${escapeHtml(p.no_proxy)}</code>`);

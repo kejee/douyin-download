@@ -15,10 +15,10 @@ from pydantic import BaseModel
 import httpx
 from extractors.router import UnifiedMediaRouter
 from extractors.douyin import DEFAULT_USER_AGENT
-from downloader.http_util import referer_for_url
+from downloader.http_util import referer_for_url, platform_for_url
 from downloader import proxy_config
 
-APP_VERSION = "2.6.6.0"
+APP_VERSION = "2.6.7.0"
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,9 @@ async def proxy_download(
         "Referer": referer,
     }
 
-    proxy = os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+    # 代理：按**媒体直链的域名**反推平台再决定（twitter 的 CDN 认成 twitter）。
+    # 不能直接读环境变量 —— 限定平台时代理不在环境里（见 proxy.env 的 PROXY_PLATFORMS）。
+    proxy = proxy_config.proxy_for_url(url)
 
     async def stream_generator():
         async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=60.0, proxy=proxy) as client:
@@ -207,22 +209,31 @@ async def stream_mux_download(
 
     # 构造 ffmpeg 管道命令: 开启 HTTP 智能重连，显式合并视频与音频轨并转为标准 aac 格式
     header_str = f"Referer: {referer}\r\nUser-Agent: {bili_ua}\r\n"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-loglevel", "error",
+    reconnect_opts = [
         "-reconnect", "1",
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
         "-headers", header_str,
-        "-i", video_url,
-        "-reconnect", "1",
-        "-reconnect_at_eof", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-headers", header_str,
-        "-i", audio_url,
+    ]
+
+    def _input_opts(url: str) -> list:
+        """某个输入（视频轨/音频轨）的选项，末尾是 `-i <url>`。
+
+        ffmpeg 自身会读 `http_proxy` 环境变量，但**限定平台时代理不在环境里**
+        （见 proxy.env 的 PROXY_PLATFORMS），所以这里按直链域名反推平台、
+        显式传 `-http_proxy`。该选项只对紧随其后的那个输入生效。
+        """
+        opts = list(reconnect_opts)
+        proxy = proxy_config.proxy_for_url(url)
+        if proxy:
+            opts += ["-http_proxy", proxy]
+        return opts + ["-i", url]
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    cmd += _input_opts(video_url)
+    cmd += _input_opts(audio_url)
+    cmd += [
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-c:v", "copy",
@@ -686,6 +697,9 @@ async def prepare_preview(req: PreviewPrepareRequest, request: Request):
             audio_url=req.audio_url or None,
             title=req.title or "预览",
             channel="preview",
+            # 按直链域名反推平台：预览任务同样要按平台决定是否走代理，
+            # 否则"只让 twitter 走代理"时，Twitter 的预览会下不动。
+            platform=platform_for_url(req.video_url or ""),
             filename=f"{key}.mp4",
             task_id=task_id,
             owner=_client_id(request),

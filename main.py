@@ -18,7 +18,7 @@ from extractors.douyin import DEFAULT_USER_AGENT
 from downloader.http_util import referer_for_url, platform_for_url
 from downloader import proxy_config
 
-APP_VERSION = "2.6.7.0"
+APP_VERSION = "2.6.7.1"
 
 logger = logging.getLogger(__name__)
 

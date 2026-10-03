@@ -406,12 +406,25 @@ def proxy_for(platform: str = "") -> Optional[str]:
     return _base_proxy()
 
 
-def proxy_for_url(url: str) -> Optional[str]:
-    """按媒体直链反推平台，再决定要不要走代理。
+# 这些"平台名"等于没告诉我们，按"未知"处理 → 交给域名兜底
+_UNKNOWN_PLATFORMS = frozenset({"", "media", "unknown", "-", "none", "auto"})
 
-    下载/预览阶段手里只有一条 CDN 直链（如 video.twimg.com/...），
-    平台只能从域名推断 —— 复用 http_util 那张域名表，避免第二份口径。
+
+def proxy_for_url(url: str, platform: str = "") -> Optional[str]:
+    """决定**某次请求 / 某个任务**要不要走代理。
+
+    **显式平台优先**：`platform` 来自解析阶段的结论（输入的是 twitter 链接，
+    这一整条链路就都是 twitter），这是权威信息，与 CDN 域名无关。
+
+    只有在拿不到平台（或平台恰好是 `media` / `unknown` 这类占位值）时，
+    才退化为**按直链域名反推**。推断只能当兜底：CDN 域名与平台并非一一对应
+    —— 镜像域名（B站那堆 `upos-sz-mirror*`）、第三方 CDN、换过域名的 CDN
+    都可能认不出来，而"认不出"的后果是**该走代理的没走**（在需要代理的网络里
+    表现为"解析得到、下载不动"），这是最糟的失败模式。
     """
+    name = (platform or "").strip().lower()
+    if name not in _UNKNOWN_PLATFORMS:
+        return proxy_for(name)
     from .http_util import platform_for_url      # 延迟导入，避免包初始化期的循环
     return proxy_for(platform_for_url(url))
 

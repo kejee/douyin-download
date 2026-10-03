@@ -124,6 +124,7 @@ async def get_user_posts(req: UserPostsRequest):
 async def proxy_download(
     url: str = Query(..., description="目标媒体直链"),
     filename: str = Query("media", description="保存的文件名"),
+    platform: str = Query("", description="该直链所属平台（由解析结果给出，可选）"),
 ):
     """多平台通用代理流式下载，突破跨域与各平台 CDN 防盗链"""
     if not url:
@@ -142,9 +143,10 @@ async def proxy_download(
         "Referer": referer,
     }
 
-    # 代理：按**媒体直链的域名**反推平台再决定（twitter 的 CDN 认成 twitter）。
-    # 不能直接读环境变量 —— 限定平台时代理不在环境里（见 proxy.env 的 PROXY_PLATFORMS）。
-    proxy = proxy_config.proxy_for_url(url)
+    # 代理：优先用前端带来的 platform（解析阶段的权威结论），
+    # 没带时才按媒体直链的域名反推。不能直接读环境变量 ——
+    # 限定平台时代理不在环境里（见 proxy.env 的 PROXY_PLATFORMS）。
+    proxy = proxy_config.proxy_for_url(url, platform)
 
     async def stream_generator():
         async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=60.0, proxy=proxy) as client:
@@ -188,6 +190,7 @@ async def stream_mux_download(
     audio_url: str = Query("", description="音频轨直链"),
     filename: str = Query("bilibili_video.mp4", description="合成后的文件名"),
     inline: bool = Query(False, description="是否用于网页内嵌预览播放"),
+    platform: str = Query("", description="该直链所属平台（由解析结果给出，可选）"),
 ):
     """B站等多音视频轨 DASH 实时内存管道混流下载与在线预览 (基于 FFmpeg 零磁盘流式封装)"""
     if not video_url:
@@ -195,7 +198,7 @@ async def stream_mux_download(
 
     # 若无音频轨，直接走普通代理下载
     if not audio_url:
-        return await proxy_download(url=video_url, filename=filename)
+        return await proxy_download(url=video_url, filename=filename, platform=platform)
 
     safe_filename = re.sub(r'[\\/:*?"<>|\r\n]', '_', filename).strip() or "video.mp4"
     if not safe_filename.endswith(".mp4"):
@@ -221,11 +224,12 @@ async def stream_mux_download(
         """某个输入（视频轨/音频轨）的选项，末尾是 `-i <url>`。
 
         ffmpeg 自身会读 `http_proxy` 环境变量，但**限定平台时代理不在环境里**
-        （见 proxy.env 的 PROXY_PLATFORMS），所以这里按直链域名反推平台、
-        显式传 `-http_proxy`。该选项只对紧随其后的那个输入生效。
+        （见 proxy.env 的 PROXY_PLATFORMS），所以这里显式传 `-http_proxy`。
+        平台优先用调用方给的，没给才按直链域名反推。
+        该选项只对紧随其后的那个输入生效。
         """
         opts = list(reconnect_opts)
-        proxy = proxy_config.proxy_for_url(url)
+        proxy = proxy_config.proxy_for_url(url, platform)
         if proxy:
             opts += ["-http_proxy", proxy]
         return opts + ["-i", url]
@@ -664,6 +668,9 @@ class PreviewPrepareRequest(BaseModel):
     video_url: str
     audio_url: Optional[str] = None
     title: Optional[str] = None
+    # 由前端带上（来自解析结果）。有它就能准确判断这条预览要不要走代理，
+    # 不必靠 CDN 域名去猜 —— 猜不出时"该走代理的没走"会表现为预览一直失败。
+    platform: Optional[str] = None
 
 def _preview_task_id(key: str) -> str:
     return f"preview_{key}"
@@ -697,9 +704,10 @@ async def prepare_preview(req: PreviewPrepareRequest, request: Request):
             audio_url=req.audio_url or None,
             title=req.title or "预览",
             channel="preview",
-            # 按直链域名反推平台：预览任务同样要按平台决定是否走代理，
-            # 否则"只让 twitter 走代理"时，Twitter 的预览会下不动。
-            platform=platform_for_url(req.video_url or ""),
+            # 平台优先用前端给的（解析结果里的权威值），没给才按直链域名反推。
+            # 预览任务同样要按平台决定是否走代理，否则"只让 twitter 走代理"时，
+            # Twitter 的预览会一直下不动。
+            platform=req.platform or platform_for_url(req.video_url or ""),
             filename=f"{key}.mp4",
             task_id=task_id,
             owner=_client_id(request),

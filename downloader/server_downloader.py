@@ -928,7 +928,9 @@ class ServerDownloadManager:
         # 媒体直链同样**按平台**决定要不要走代理：限定平台时（PROXY_PLATFORMS）
         # 代理不在环境变量里，完全靠这里显式传入 —— 漏了这一步，
         # Twitter 的视频在需要代理的网络里就会「解析得到、下载不动」。
-        proxy = proxy_config.proxy_for(getattr(task, "platform", ""))
+        # 平台用任务自带的（入队时由解析结果给出，权威）；万一缺失/是 media，
+        # proxy_for_url 会自动按直链域名兜底，而不是直接当直连处理。
+        proxy = proxy_config.proxy_for_url(url, getattr(task, "platform", ""))
         async with httpx.AsyncClient(headers=request_headers, timeout=timeout,
                                      follow_redirects=True, proxy=proxy) as client:
             async with client.stream("GET", url) as resp:

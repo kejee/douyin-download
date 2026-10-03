@@ -623,7 +623,7 @@ function triggerDownload(url, filename, options = {}) {
             title: options.title || safeFilename,
             filename: safeFilename,
             subdir: options.subdir || null,
-            platform: options.platform || "media",
+            platform: options.platform || currentPlatform() || "media",
         }]);
         return;
     }
@@ -728,6 +728,15 @@ function switchMode(mode) {
     updateBiliHelperBars();
 }
 
+// 当前解析结果的平台。
+// 解析阶段就已经确定平台了（输入 twitter 链接 → 这一整条链路都是 twitter），
+// 所以它才是权威来源；下载/预览/图集各处**优先用它**，只在拿不到时才让后端按
+// CDN 域名去猜（换过域名的 CDN、镜像域名都可能猜不出来）。
+function currentPlatform() {
+    const m = window.currentMediaData;
+    return (m && m.platform) ? String(m.platform) : "";
+}
+
 // 渲染单作品结果
 function renderResult(data) {
     const resultCard = document.getElementById("resultContainer");
@@ -824,8 +833,9 @@ function renderResult(data) {
         // B站双轨预览的入口参数（点击「准备预览」时才真正开始混流）
         // 令牌自增用于作废上一次解析遗留的轮询，避免切视频后旧任务把新播放器改掉
         // 直连模式也要登记参数：一旦直连失败，回退流程正是靠它去调 /api/preview/prepare
+        // platform 一并带上：后端据此决定这条预览要不要走代理
         window.pendingPreview = (isBiliStream || isDirectPlay)
-            ? { videoUrl: noWmUrl, audioUrl: isBiliStream ? audioUrl : "", title: cleanTitle }
+            ? { videoUrl: noWmUrl, audioUrl: isBiliStream ? audioUrl : "", title: cleanTitle, platform }
             : null;
         window.previewJobToken = (window.previewJobToken || 0) + 1;
 
@@ -906,6 +916,7 @@ function renderResult(data) {
         window.pendingGallery = {
             images: images,
             title: cleanTitle,
+            platform: platform || "",
             selected: new Set(images.map((_, i) => i)),
         };
         const galleryItems = images.map((imgUrl, idx) => `
@@ -1287,6 +1298,7 @@ async function startPreviewPrepare() {
                 video_url: pending.videoUrl,
                 audio_url: pending.audioUrl || null,
                 title: pending.title || "",
+                platform: pending.platform || currentPlatform() || null,
             }),
         });
         if (!resp.ok) throw new Error(`预览准备请求失败 (${resp.status})`);
@@ -2951,6 +2963,9 @@ async function runSingleTask(task) {
 
             vUrl = parseData.video.no_watermark_url;
             aUrl = parseData.video.audio_url;
+            // 顺手回填平台：这条是"提交时只知道分享链接"的任务，解析完才知道平台，
+            // 回填后后面调网关时就能把平台带过去（代理判定要用）
+            if (parseData.platform && !task.platform) task.platform = parseData.platform;
         }
 
         if (!vUrl) {
@@ -2960,9 +2975,11 @@ async function runSingleTask(task) {
         task.progress = 15;
         renderTaskManagerUI();
 
+        // 带上平台：后端据此决定这条流要不要走代理（按域名猜不一定猜得准）
+        const platQs = `&platform=${encodeURIComponent(task.platform || currentPlatform() || "")}`;
         const streamUrl = aUrl 
-            ? `/api/stream/mux?video_url=${encodeURIComponent(vUrl)}&audio_url=${encodeURIComponent(aUrl)}&filename=${encodeURIComponent(task.filename)}`
-            : `/api/download?url=${encodeURIComponent(vUrl)}&filename=${encodeURIComponent(task.filename)}`;
+            ? `/api/stream/mux?video_url=${encodeURIComponent(vUrl)}&audio_url=${encodeURIComponent(aUrl)}&filename=${encodeURIComponent(task.filename)}${platQs}`
+            : `/api/download?url=${encodeURIComponent(vUrl)}&filename=${encodeURIComponent(task.filename)}${platQs}`;
 
         const fileResp = await fetch(streamUrl, { signal: abortCtrl.signal });
         if (!fileResp.ok) throw new Error("下载数据流响应异常 (" + fileResp.status + ")");
@@ -3509,6 +3526,14 @@ async function submitTasksToServerArchive(items, options = {}) {
     // 自动补齐已配置的平台鉴权凭证（B站 SESSDATA / Twitter auth_token）
     items = items.map(item => attachAuthCredentials({ ...item }));
 
+    // 统一补齐平台：调用点忘了传时用**当前解析结果的平台**，不要退化成 "media"。
+    // "media" 会让「只让 twitter 走代理」（PROXY_PLATFORMS）在这条任务上失效，
+    // 表现是"解析得到、下载不动"，而且没人会想到是平台字段丢了。
+    items = items.map(item => ({
+        ...item,
+        platform: item.platform || currentPlatform() || "media",
+    }));
+
     // 归档目录里已有同名文件时先处理：单条弹窗、批量跳过。
     // 少了这一步，重复下载既没有任何提示、又会静默覆盖掉归档里的原文件
     // （此前只有桌面端保存那条通道有检查，归档通道一直缺失）。
@@ -3709,7 +3734,7 @@ function triggerMuxDownload(videoUrl, audioUrl, filename, options = {}) {
             title: options.title || safeFilename,
             filename: safeFilename,
             subdir: options.subdir || null,
-            platform: options.platform || "media",
+            platform: options.platform || currentPlatform() || "media",
         }]);
         return;
     }
@@ -4364,7 +4389,7 @@ function downloadAllImages() {
                 title: `${g.title}_图${idx + 1}.jpg`,
                 filename: `${g.title}_图${idx + 1}.jpg`,
                 subdir: title,
-                platform: "media",
+                platform: g.platform || currentPlatform() || "media",
             })),
             { toastOk: `已提交 ${indexes.length} 张原图到 NAS 归档（归档到「${title}」文件夹）` }
         );
